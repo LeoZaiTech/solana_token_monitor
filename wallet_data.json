@@ -1,0 +1,13 @@
+{
+    "blacklisted_wallets": {
+        "snipers": {},
+        "insiders": {},
+        "scammers": {}
+    },
+    "trusted_wallets": {
+        "successful_traders": {},
+        "long_term_holders": {}
+    },
+    "deployer_stats": {},
+    "token_history": {}
+}
