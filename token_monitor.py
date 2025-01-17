@@ -6,9 +6,8 @@ import requests
 from dotenv import load_dotenv
 from discord_webhook import DiscordWebhook
 import logging
-import aiohttp
-import asyncio
 from typing import Dict, List, Tuple
+from textblob import TextBlob
 
 # Load environment variables
 load_dotenv()
@@ -38,10 +37,10 @@ class TokenMonitor:
         self.MAX_SUPPLY_PERCENTAGE = 8  # 8%
         self.BUY_SELL_RATIO_THRESHOLD = 0.7  # 70%
 
-    async def fetch_new_tokens(self) -> List[Dict]:
+    def fetch_new_tokens(self) -> List[Dict]:
         """Fetch newly launched tokens from pump.fun (mocked for now)."""
         # TODO: Replace with actual API call to pump.fun
-        await asyncio.sleep(1)  # Simulating async behavior
+        time.sleep(1)  # Simulating async behavior
         return [{
             'address': 'test_token_address',
             'name': 'Test Token',
@@ -51,7 +50,7 @@ class TokenMonitor:
             'holders': 100
         }]
 
-    async def check_deployer_history(self, deployer_address: str) -> bool:
+    def check_deployer_history(self, deployer_address: str) -> bool:
         """Check deployer's history and previous token performance."""
         logging.info(f"Checking deployer history for address: {deployer_address}")
 
@@ -79,23 +78,22 @@ class TokenMonitor:
 
         try:
             url = f"https://api.helius.xyz/v0/deployer/{deployer_address}?api-key={self.helius_api_key}"
-            async with aiohttp.ClientSession() as session:
-                async with session.get(url) as response:
-                    if response.status == 200:
-                        data = await response.json()
-                        # TODO: Implement actual deployer history analysis
-                        logging.info(f"Deployer {deployer_address} passed checks")
-                        return True
-                    elif response.status == 404:
-                        logging.warning(f"Deployer {deployer_address} not found")
-                        self.blacklisted_deployers[deployer_address] = {
-                            'timestamp': time.time(),
-                            'reason': 'Deployer not found in API'
-                        }
-                        return False
-                    else:
-                        logging.error(f"Failed to fetch deployer history: {response.status}")
-                        return False
+            response = requests.get(url)
+            if response.status_code == 200:
+                data = response.json()
+                # TODO: Implement actual deployer history analysis
+                logging.info(f"Deployer {deployer_address} passed checks")
+                return True
+            elif response.status_code == 404:
+                logging.warning(f"Deployer {deployer_address} not found")
+                self.blacklisted_deployers[deployer_address] = {
+                    'timestamp': time.time(),
+                    'reason': 'Deployer not found in API'
+                }
+                return False
+            else:
+                logging.error(f"Failed to fetch deployer history: {response.status_code}")
+                return False
         except Exception as e:
             logging.error(f"Error in check_deployer_history: {e}")
             return False
@@ -116,31 +114,31 @@ class TokenMonitor:
             }
             logging.warning(f"Added {deployer_address} to blacklist. Reason: {reason}")
 
-    async def analyze_holders(self, token_address: str) -> Tuple[bool, Dict]:
+    def analyze_holders(self, token_address: str) -> Tuple[bool, Dict]:
         """Analyze token holders and transactions."""
         try:
             # TODO: Implement actual analysis logic
-            await asyncio.sleep(1)  # Simulating async behavior
+            time.sleep(1)  # Simulating async behavior
             return True, {"holders": 100, "snipers": 1, "insiders": 1}
         except Exception as e:
             logging.error(f"Error in analyze_holders: {e}")
             return False, {}
 
-    async def check_twitter_sentiment(self, token_address: str) -> Dict:
+    def check_twitter_sentiment(self, token_address: str) -> Dict:
         """Analyze Twitter sentiment and notable mentions."""
         try:
             # TODO: Implement Twitter sentiment analysis
-            await asyncio.sleep(1)  # Simulating async behavior
+            time.sleep(1)  # Simulating async behavior
             return {"sentiment": 0.5, "mentions": []}  # Mocked data
         except Exception as e:
             logging.error(f"Error in check_twitter_sentiment: {e}")
             return {}
 
-    async def analyze_top_holders(self, token_address: str) -> Dict:
+    def analyze_top_holders(self, token_address: str) -> Dict:
         """Analyze performance of top 30 holders."""
         try:
             # TODO: Implement top holder analysis
-            await asyncio.sleep(1)  # Simulating async behavior
+            time.sleep(1)  # Simulating async behavior
             return {"top_holders": []}  # Mocked data
         except Exception as e:
             logging.error(f"Error in analyze_top_holders: {e}")
@@ -155,7 +153,7 @@ class TokenMonitor:
             logging.error(f"Error in compute_confidence_score: {e}")
             return 0.0
 
-    async def send_notification(self, token_data: Dict):
+    def send_notification(self, token_data: Dict):
         """Send notification to Discord webhook."""
         if not self.discord_webhook_url:
             logging.error("Discord webhook URL not configured")
@@ -186,12 +184,12 @@ class TokenMonitor:
         except Exception as e:
             logging.error(f"Error sending notification: {e}")
 
-    async def monitor_tokens(self):
+    def monitor_tokens(self):
         """Main monitoring loop."""
         try:
             while True:
                 logging.info("Fetching new tokens...")
-                new_tokens = await self.fetch_new_tokens()
+                new_tokens = self.fetch_new_tokens()
                 logging.info(f"Fetched {len(new_tokens)} new tokens")
 
                 for token in new_tokens:
@@ -207,7 +205,7 @@ class TokenMonitor:
                         logging.warning(f"Token skipped: Market cap {token['market_cap']} below threshold.")
                         continue
 
-                    deployer_check = await self.check_deployer_history(token['deployer'])
+                    deployer_check = self.check_deployer_history(token['deployer'])
                     if not deployer_check:
                         self.blacklisted_deployers[token['deployer']] = {
                             'timestamp': time.time(),
@@ -216,13 +214,13 @@ class TokenMonitor:
                         logging.warning(f"Deployer {token['deployer']} blacklisted.")
                         continue
 
-                    holder_check, holder_data = await self.analyze_holders(token['address'])
+                    holder_check, holder_data = self.analyze_holders(token['address'])
                     if not holder_check:
                         logging.warning(f"Token skipped: Holder analysis failed for {token['address']}.")
                         continue
 
-                    sentiment_data = await self.check_twitter_sentiment(token['address'])
-                    holder_analysis = await self.analyze_top_holders(token['address'])
+                    sentiment_data = self.check_twitter_sentiment(token['address'])
+                    holder_analysis = self.analyze_top_holders(token['address'])
 
                     # Compute confidence score
                     analysis_data = {
@@ -233,13 +231,13 @@ class TokenMonitor:
                     confidence_score = self.compute_confidence_score(analysis_data)
 
                     if confidence_score >= 0.8:  # Adjust threshold as needed
-                        await self.send_notification({
+                        self.send_notification({
                             'token_address': token['address'],
                             'confidence_score': confidence_score,
                             'analysis': analysis_data
                         })
 
-                await asyncio.sleep(30)  # Sleep to avoid rate limits
+                time.sleep(30)  # Sleep to avoid rate limits
         except KeyboardInterrupt:
             logging.info("Monitoring interrupted. Exiting...")
         except Exception as e:
@@ -247,4 +245,4 @@ class TokenMonitor:
 
 if __name__ == "__main__":
     monitor = TokenMonitor()
-    asyncio.run(monitor.monitor_tokens())
+    monitor.monitor_tokens()
