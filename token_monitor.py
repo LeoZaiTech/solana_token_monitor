@@ -8,6 +8,29 @@ from discord_webhook import DiscordWebhook
 import logging
 from typing import Dict, List, Tuple
 from textblob import TextBlob
+import aiohttp
+
+PUMP_FUN_API = "https://api.pump.fun/v1"
+
+async def fetch_new_tokens():
+    """Fetch new tokens from pump.fun API"""
+    try:
+        async with aiohttp.ClientSession() as session:
+            async with session.get(f"{PUMP_FUN_API}/tokens/new") as response:
+                if response.status == 200:
+                    tokens = await response.json()
+                    valid_tokens = [
+                        token for token in tokens if token.get('market_cap', 0) > 30000
+                    ]
+                    logging.info(f"Found {len(valid_tokens)} valid tokens.")
+                    return valid_tokens
+                else:
+                    logging.error(f"Failed to fetch tokens: {response.status}")
+                    return []
+    except Exception as e:
+        logging.error(f"Error fetching tokens: {e}")
+        return []
+
 
 # Load environment variables
 load_dotenv()
