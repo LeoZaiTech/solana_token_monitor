@@ -4,14 +4,16 @@ import json
 import aiohttp
 import logging
 import asyncio
+from datetime import datetime, timezone
 from typing import Dict, List, Optional, Any, Callable, Set
-from datetime import datetime, timedelta, timezone
 from pydantic import BaseModel, Field
 from tenacity import retry, stop_after_attempt, wait_exponential
 from aiohttp import ClientResponseError, ClientConnectorError
 import sqlite3
 from pathlib import Path
 import aiohttp.client_exceptions
+
+load_dotenv()
 
 class TokenTrade(BaseModel):
     """Model for token trade data"""
@@ -128,7 +130,6 @@ class PumpAPI:
     """Interface with Pump Fun API using Bitquery's GraphQL API."""
     
     def __init__(self, api_key: Optional[str] = None, max_retries: int = 3):
-        load_dotenv()
         self.base_url = "https://graphql.bitquery.io"
         self.api_key = api_key if api_key else os.getenv("BITQUERY_API_KEY", "")
         self.max_retries = max_retries
@@ -535,6 +536,111 @@ class PumpAPI:
             await self._ws.close()
             self._ws = None
 
+class PumpFunAPI:
+    def __init__(self):
+        self.base_url = "https://api.pump.fun/v1"
+        self.session = None
+    
+    async def __aenter__(self):
+        self.session = aiohttp.ClientSession()
+        return self
+    
+    async def __aexit__(self, exc_type, exc_val, exc_tb):
+        if self.session:
+            await self.session.close()
+    
+    async def get_token_info(self, token_address):
+        """Get detailed token information from pump.fun"""
+        endpoint = f"{self.base_url}/tokens/{token_address}"
+        try:
+            async with self.session.get(endpoint) as response:
+                if response.status == 200:
+                    data = await response.json()
+                    return {
+                        'name': data.get('name'),
+                        'symbol': data.get('symbol'),
+                        'market_cap': float(data.get('marketCap', 0)),
+                        'price': float(data.get('price', 0)),
+                        'holders': int(data.get('holders', 0)),
+                        'total_supply': float(data.get('totalSupply', 0))
+                    }
+                return None
+        except Exception as e:
+            logging.error(f"Error fetching token info: {e}")
+            return None
+    
+    async def get_token_holders(self, token_address):
+        """Get detailed holder information"""
+        endpoint = f"{self.base_url}/tokens/{token_address}/holders"
+        try:
+            async with self.session.get(endpoint) as response:
+                if response.status == 200:
+                    data = await response.json()
+                    holders = []
+                    total_supply = float(data.get('totalSupply', 0))
+                    
+                    for holder in data.get('holders', []):
+                        balance = float(holder.get('balance', 0))
+                        percentage = (balance / total_supply * 100) if total_supply > 0 else 0
+                        holders.append({
+                            'address': holder.get('address'),
+                            'balance': balance,
+                            'percentage': percentage,
+                            'is_contract': holder.get('isContract', False)
+                        })
+                    
+                    return holders
+                return []
+        except Exception as e:
+            logging.error(f"Error fetching holder info: {e}")
+            return []
+    
+    async def get_token_trades(self, token_address, limit=100):
+        """Get recent trades for a token"""
+        endpoint = f"{self.base_url}/tokens/{token_address}/trades"
+        params = {'limit': limit}
+        
+        try:
+            async with self.session.get(endpoint, params=params) as response:
+                if response.status == 200:
+                    data = await response.json()
+                    return [{
+                        'timestamp': trade.get('timestamp'),
+                        'type': trade.get('type'),  # 'buy' or 'sell'
+                        'amount': float(trade.get('amount', 0)),
+                        'price': float(trade.get('price', 0)),
+                        'trader': trade.get('trader')
+                    } for trade in data.get('trades', [])]
+                return []
+        except Exception as e:
+            logging.error(f"Error fetching trade info: {e}")
+            return []
+    
+    async def monitor_new_tokens(self):
+        """Monitor for new token launches on pump.fun"""
+        endpoint = f"{self.base_url}/tokens/new"
+        
+        while True:
+            try:
+                async with self.session.get(endpoint) as response:
+                    if response.status == 200:
+                        tokens = await response.json()
+                        for token in tokens:
+                            yield {
+                                'address': token.get('address'),
+                                'name': token.get('name'),
+                                'symbol': token.get('symbol'),
+                                'deployer': token.get('deployer'),
+                                'launch_time': token.get('launchTime'),
+                                'initial_market_cap': float(token.get('initialMarketCap', 0))
+                            }
+                    
+                await asyncio.sleep(5)  # Poll every 5 seconds
+                    
+            except Exception as e:
+                logging.error(f"Error monitoring new tokens: {e}")
+                await asyncio.sleep(30)  # Longer delay on error
+
 async def test_pump_api():
     """Test the Bitquery Pump Fun API integration."""
     api = PumpAPI()
@@ -547,7 +653,7 @@ async def test_pump_api():
     if trades:
         print("\nRecent Trades:")
         for trade in trades:
-            print(json.dumps(trade.model_dump(), indent=2))
+            print(json.dumps(trade, indent=2))
     else:
         print("No trades found or error occurred")
     
@@ -555,7 +661,7 @@ async def test_pump_api():
     stats = await api.get_token_stats(test_token)
     if stats:
         print("\nToken Stats:")
-        print(json.dumps(stats.model_dump(), indent=2))
+        print(json.dumps(stats, indent=2))
     else:
         print("No stats found or error occurred")
 
@@ -565,7 +671,7 @@ async def test_token_subscription():
     
     def handle_new_token(token: TokenCreation):
         print("\nNew Token Created:")
-        print(json.dumps(token.model_dump(), indent=2))
+        print(json.dumps(token, indent=2))
     
     print("Listening for new token creations... (Press Ctrl+C to stop)")
     try:
@@ -577,6 +683,40 @@ async def test_token_subscription():
         print(f"Error: {e}")
         await api.stop_subscription()
 
+async def test_pumpfun_api():
+    async with PumpFunAPI() as api:
+        test_token = "DezXAZ8z7PnrnRJjz3wXBoRgixCa6xjnB7YaB1pPB263"
+        print(f"\nGetting token info for: {test_token}")
+        info = await api.get_token_info(test_token)
+        if info:
+            print("\nToken Info:")
+            print(json.dumps(info, indent=2))
+        else:
+            print("No info found or error occurred")
+        
+        print(f"\nGetting token holders for: {test_token}")
+        holders = await api.get_token_holders(test_token)
+        if holders:
+            print("\nToken Holders:")
+            for holder in holders:
+                print(json.dumps(holder, indent=2))
+        else:
+            print("No holders found or error occurred")
+        
+        print(f"\nGetting token trades for: {test_token}")
+        trades = await api.get_token_trades(test_token, limit=5)
+        if trades:
+            print("\nToken Trades:")
+            for trade in trades:
+                print(json.dumps(trade, indent=2))
+        else:
+            print("No trades found or error occurred")
+        
+        print("\nMonitoring new tokens...")
+        async for token in api.monitor_new_tokens():
+            print("\nNew Token:")
+            print(json.dumps(token, indent=2))
+
 if __name__ == "__main__":
     logging.basicConfig(
         level=logging.INFO,
@@ -584,3 +724,4 @@ if __name__ == "__main__":
     )
     asyncio.run(test_pump_api())
     asyncio.run(test_token_subscription())
+    asyncio.run(test_pumpfun_api())

@@ -21,9 +21,11 @@ DB_FILE = "solana_transactions.db"
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
 
 def init_db():
-    """Initialize the database schema for storing Solana transaction data."""
+    """Initialize database schema for token monitoring"""
     conn = sqlite3.connect(DB_FILE)
     c = conn.cursor()
+    
+    # Transactions table for token events
     c.execute('''
         CREATE TABLE IF NOT EXISTS transactions (
             signature TEXT PRIMARY KEY,
@@ -42,6 +44,74 @@ def init_db():
             high_holder_count INTEGER
         )
     ''')
+    
+    # Deployers table for tracking token creators
+    c.execute('''
+        CREATE TABLE IF NOT EXISTS deployers (
+            address TEXT PRIMARY KEY,
+            total_tokens INTEGER DEFAULT 0,
+            successful_tokens INTEGER DEFAULT 0,
+            tokens_above_3m INTEGER DEFAULT 0,
+            tokens_above_200k INTEGER DEFAULT 0,
+            last_updated INTEGER,
+            is_blacklisted BOOLEAN DEFAULT FALSE
+        )
+    ''')
+    
+    # Wallets table for tracking snipers and insiders
+    c.execute('''
+        CREATE TABLE IF NOT EXISTS wallets (
+            address TEXT PRIMARY KEY,
+            wallet_type TEXT,  -- 'sniper', 'insider', 'whale', 'normal'
+            success_rate REAL DEFAULT 0,
+            total_trades INTEGER DEFAULT 0,
+            profitable_trades INTEGER DEFAULT 0,
+            last_14d_trades INTEGER DEFAULT 0,
+            last_14d_successes INTEGER DEFAULT 0,
+            last_updated INTEGER
+        )
+    ''')
+    
+    # Tokens table for detailed token tracking
+    c.execute('''
+        CREATE TABLE IF NOT EXISTS tokens (
+            address TEXT PRIMARY KEY,
+            name TEXT,
+            symbol TEXT,
+            deployer_address TEXT,
+            launch_time INTEGER,
+            current_market_cap REAL DEFAULT 0,
+            peak_market_cap REAL DEFAULT 0,
+            holder_count INTEGER DEFAULT 0,
+            large_holder_count INTEGER DEFAULT 0,  -- holders with >8% supply
+            buy_count INTEGER DEFAULT 0,
+            sell_count INTEGER DEFAULT 0,
+            twitter_handle TEXT,
+            twitter_name_changes INTEGER DEFAULT 0,
+            sentiment_score REAL DEFAULT 0,
+            confidence_score REAL DEFAULT 0,
+            is_verified BOOLEAN DEFAULT FALSE,
+            last_updated INTEGER,
+            FOREIGN KEY (deployer_address) REFERENCES deployers (address)
+        )
+    ''')
+    
+    # Top holders table
+    c.execute('''
+        CREATE TABLE IF NOT EXISTS top_holders (
+            token_address TEXT,
+            holder_address TEXT,
+            balance REAL,
+            percentage REAL,
+            win_rate_14d REAL DEFAULT 0,
+            pnl_30d REAL DEFAULT 0,
+            last_updated INTEGER,
+            PRIMARY KEY (token_address, holder_address),
+            FOREIGN KEY (token_address) REFERENCES tokens (address),
+            FOREIGN KEY (holder_address) REFERENCES wallets (address)
+        )
+    ''')
+    
     conn.commit()
     conn.close()
 
