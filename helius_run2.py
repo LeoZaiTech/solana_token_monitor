@@ -4,6 +4,7 @@ import json
 import requests
 from datetime import datetime
 from dotenv import load_dotenv
+import logging
 
 # Load environment variables
 load_dotenv()
@@ -12,6 +13,9 @@ DISCORD_WEBHOOK_URL = os.getenv("DISCORD_WEBHOOK_URL")
 
 # SQLite database initialization
 DB_FILE = "solana_transactions.db"
+
+# Configure logging
+logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
 
 def init_db():
     """Initialize the database schema for storing Solana transaction data."""
@@ -59,7 +63,7 @@ def fetch_transaction(signature):
     if response.status_code == 200:
         return response.json().get("result", {})
     else:
-        print(f"Error fetching transaction: {response.text}")
+        logging.error(f"Error fetching transaction: {response.text}")
         return None
 
 def analyze_holders(token_transfers):
@@ -146,9 +150,16 @@ def notify_discord(message):
     response = requests.post(DISCORD_WEBHOOK_URL, json=payload, headers=headers)
 
     if response.status_code == 204:
-        print("Notification sent successfully.")
+        logging.info("Notification sent successfully.")
     else:
-        print(f"Error sending notification: {response.text}")
+        logging.error(f"Error sending notification: {response.text}")
+
+def check_market_cap(market_cap):
+    """Check if token surpasses the required market cap."""
+    if market_cap >= 30000:
+        return True
+    logging.warning(f"Token skipped: Market cap {market_cap} below threshold.")
+    return False
 
 def main():
     init_db()
@@ -156,14 +167,14 @@ def main():
     # Sample transaction signature (replace with actual ones)
     sample_signature = "4JWQMMs63xBM3dGKUF29YZnyp6LMEJJGCACo6YBiU2toTqiUDPP79i35Ynct8f6ppCtnRGG7FM7DxomzmYCtuy6F"
 
-    print(f"Fetching transaction: {sample_signature}")
+    logging.info(f"Fetching transaction: {sample_signature}")
     tx_data = fetch_transaction(sample_signature)
 
     if tx_data:
         parsed_data = parse_transaction_data(tx_data)
         if parsed_data:
             save_transaction_to_db(parsed_data)
-            print("Transaction saved successfully.")
+            logging.info("Transaction saved successfully.")
 
             # Evaluate the token against criteria
             if parsed_data[9] > 2 or parsed_data[10] > 2 or parsed_data[12] > 70 or parsed_data[13] > 2:
@@ -171,9 +182,9 @@ def main():
             else:
                 notify_discord(f"✅ Token passed criteria: {parsed_data[0]}")
         else:
-            print("No valid data to save.")
+            logging.warning("No valid data to save.")
     else:
-        print("Transaction fetch failed.")
+        logging.error("Transaction fetch failed.")
 
 if __name__ == "__main__":
     main()
