@@ -127,6 +127,37 @@ def parse_transaction_data(tx_data):
             token_transfers_json, deployer_address, holder_count, sniper_count, insider_count,
             buy_sell_ratio, high_holder_count)
 
+def notify_discord(tx_data):
+    """Send a detailed notification to Discord."""
+    
+    message = (
+        f"🚨 **New Token Transaction Alert!**\n\n"
+        f"**Transaction Signature:** `{tx_data[0]}`\n"
+        f"**Block Time:** {datetime.utcfromtimestamp(tx_data[1]).strftime('%Y-%m-%d %H:%M:%S UTC')}\n"
+        f"**Transaction Fee:** {tx_data[2] / 1e9} SOL\n"
+        f"**Deployer Address:** `{tx_data[8]}`\n"
+        f"**Holder Count:** {tx_data[9]}\n"
+        f"**Sniper Count:** {tx_data[10]}\n"
+        f"**Insider Count:** {tx_data[11]}\n"
+        f"**Buy/Sell Ratio:** {tx_data[12]}%\n"
+        f"**High Holder Count:** {tx_data[13]}\n\n"
+        f"**Risk Analysis:** "
+        f"{'⚠️ High-risk token detected!' if tx_data[9] > 2 or tx_data[10] > 2 or tx_data[12] > 70 or tx_data[13] > 2 else '✅ Token passed criteria'}\n\n"
+        f"🔗 [View on Solana Explorer](https://solscan.io/tx/{tx_data[0]})"
+    )
+
+    payload = {
+        "content": message
+    }
+    headers = {"Content-Type": "application/json"}
+    response = requests.post(DISCORD_WEBHOOK_URL, json=payload, headers=headers)
+
+    if response.status_code == 204:
+        logging.info("Notification sent successfully.")
+    else:
+        logging.error(f"Error sending notification: {response.text}")
+
+
 def save_transaction_to_db(tx_data):
     """Save parsed transaction data into the SQLite database."""
     conn = sqlite3.connect(DB_FILE)
