@@ -512,6 +512,8 @@ def is_successful_token(tx_data):
 
 def main():
     init_db()
+    ensure_db_columns()
+    
     sample_signature = "4JWQMMs63xBM3dGKUF29YZnyp6LMEJJGCACo6YBiU2toTqiUDPP79i35Ynct8f6ppCtnRGG7FM7DxomzmYCtuy6F"
 
     logging.info(f"Fetching transaction: {sample_signature}")
@@ -523,24 +525,27 @@ def main():
             save_transaction_to_db(parsed_data)
 
             deployer_address = parsed_data[8]  # Get deployer address from parsed data
-            
+
             # Insert or update token information in the database
             conn = sqlite3.connect(DB_FILE)
             try:
                 c = conn.cursor()
                 c.execute('''
-                    INSERT OR REPLACE INTO tokens 
-                    (address, deployer_address, launch_time, current_market_cap, peak_market_cap)
-                    VALUES (?, ?, ?, ?, 
-                        CASE 
-                            WHEN ? > (SELECT peak_market_cap FROM tokens WHERE address = ?)
-                            THEN ?
-                            ELSE (SELECT peak_market_cap FROM tokens WHERE address = ?)
+                    INSERT INTO tokens (address, deployer_address, launch_time, current_market_cap, peak_market_cap)
+                    VALUES (?, ?, ?, ?, ?)
+                    ON CONFLICT(address) 
+                    DO UPDATE SET 
+                        deployer_address = excluded.deployer_address,
+                        launch_time = excluded.launch_time,
+                        current_market_cap = excluded.current_market_cap,
+                        peak_market_cap = CASE 
+                            WHEN excluded.peak_market_cap > tokens.peak_market_cap 
+                            THEN excluded.peak_market_cap
+                            ELSE tokens.peak_market_cap
                         END
-                    )
-                ''', ('TestToken123', deployer_address, int(datetime.now().timestamp()), 250000, 
-                      250000, 'TestToken123', 250000, 'TestToken123'))
+                ''', ('TestToken123', deployer_address, int(datetime.now().timestamp()), 250000, 250000))
                 conn.commit()
+                logging.info("Token data inserted/updated successfully.")
             except sqlite3.Error as e:
                 logging.error(f"Error inserting token data: {e}")
             finally:
@@ -566,6 +571,27 @@ def main():
     except Exception as e:
         logging.error(f"Error running additional analyses: {e}")
 
+def ensure_db_columns():
+    """Ensure required columns exist in the deployers table"""
+    conn = sqlite3.connect(DB_FILE)
+    c = conn.cursor()
+    try:
+        c.execute("PRAGMA table_info(deployers)")
+        columns = [row[1] for row in c.fetchall()]
+        
+        if "last_token_time" not in columns:
+            c.execute("ALTER TABLE deployers ADD COLUMN last_token_time INTEGER DEFAULT 0")
+            logging.info("Added column 'last_token_time' to deployers table.")
+        
+        if "failure_rate" not in columns:
+            c.execute("ALTER TABLE deployers ADD COLUMN failure_rate REAL DEFAULT 0")
+            logging.info("Added column 'failure_rate' to deployers table.")
+        
+        conn.commit()
+    except sqlite3.Error as e:
+        logging.error(f"Error updating database schema: {e}")
+    finally:
+        conn.close()
+
 if __name__ == "__main__":
     main()
-
