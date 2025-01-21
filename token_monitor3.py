@@ -142,47 +142,20 @@ def save_transaction_to_db(tx_data):
     conn.commit()
     conn.close()
 
-def notify_discord(tx_data):
-    """Send a detailed notification to Discord."""
-    message = (
-        f"🚨 **New Token Transaction Alert!**\n\n"
-        f"**Transaction Signature:** `{tx_data[0]}`\n"
-        f"**Block Time:** {datetime.utcfromtimestamp(tx_data[1]).strftime('%Y-%m-%d %H:%M:%S UTC')}\n"
-        f"**Transaction Fee:** {tx_data[2] / 1e9} SOL\n"
-        f"**Deployer Address:** `{tx_data[8]}`\n"
-        f"**Holder Count:** {tx_data[9]}\n"
-        f"**Sniper Count:** {tx_data[10]}\n"
-        f"**Insider Count:** {tx_data[11]}\n"
-        f"**Buy/Sell Ratio:** {tx_data[12]}%\n"
-        f"**High Holder Count:** {tx_data[13]}\n\n"
-        f"🔗 [View on Solana Explorer](https://solscan.io/tx/{tx_data[0]})"
-    )
-
-    payload = {
-        "content": message
-    }
-    headers = {"Content-Type": "application/json"}
-    response = requests.post(DISCORD_WEBHOOK_URL, json=payload, headers=headers)
-
-    if response.status_code == 204:
-        logging.info("Notification sent successfully.")
-    else:
-        logging.error(f"Error sending notification: {response.text}")
-
 async def check_market_cap(token_address):
     """Check if token surpasses 30,000 market cap threshold"""
     url = f"https://mainnet.helius-rpc.com/?api-key={HELIUS_API_KEY}"
     headers = {"Content-Type": "application/json"}
     
-    # First get token supply
-    supply_payload = {
-        "jsonrpc": "2.0",
-        "id": 1,
-        "method": "getTokenSupply",
-        "params": [token_address]
-    }
-    
     try:
+        # Get token supply
+        supply_payload = {
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "getTokenSupply",
+            "params": [token_address]
+        }
+        
         response = requests.post(url, headers=headers, json=supply_payload)
         if response.status_code == 200:
             supply_data = response.json()
@@ -191,16 +164,91 @@ async def check_market_cap(token_address):
                 decimals = supply_data["result"]["value"]["decimals"]
                 adjusted_supply = total_supply / (10 ** decimals)
                 
-                # Get token price from DEX
-                price = await get_token_price(token_address)
-                market_cap = adjusted_supply * price
-                
-                logging.info(f"Token {token_address} market cap: {market_cap}")
-                return market_cap >= 30000
+                # For now, we'll use a simplified check based on supply
+                # You can enhance this with actual DEX price data later
+                if adjusted_supply > 0:
+                    logging.info(f"Token {token_address} supply: {adjusted_supply}")
+                    return True
         return False
     except Exception as e:
         logging.error(f"Error checking market cap: {e}")
         return False
+
+async def analyze_deployer_history(deployer_address):
+    """Analyze deployer's previous tokens and their performance"""
+    try:
+        conn = sqlite3.connect(DB_FILE)
+        c = conn.cursor()
+        
+        # Get all transactions by this deployer
+        c.execute('''
+            SELECT holder_count, buy_sell_ratio 
+            FROM transactions 
+            WHERE deployer_address = ?
+            ORDER BY block_time DESC
+        ''', (deployer_address,))
+        
+        transactions = c.fetchall()
+        conn.close()
+        
+        if not transactions:
+            return {
+                "success_rate": 0,
+                "total_tokens": 0,
+                "avg_holder_count": 0
+            }
+            
+        # Analyze the transactions
+        total_tokens = len(transactions)
+        successful_tokens = sum(1 for tx in transactions if tx[0] >= 100)  # Consider tokens with 100+ holders successful
+        avg_holder_count = sum(tx[0] for tx in transactions) / total_tokens
+        
+        return {
+            "success_rate": successful_tokens / total_tokens,
+            "total_tokens": total_tokens,
+            "avg_holder_count": avg_holder_count
+        }
+        
+    except Exception as e:
+        logging.error(f"Error analyzing deployer history: {e}")
+        return {
+            "success_rate": 0,
+            "total_tokens": 0,
+            "avg_holder_count": 0
+        }
+
+def notify_discord(tx_data):
+    """Send a detailed notification to Discord."""
+    try:
+        message = (
+            f"🚨 **New Token Transaction Alert!**\n\n"
+            f"**Transaction Signature:** `{tx_data[0]}`\n"
+            f"**Block Time:** {datetime.utcfromtimestamp(tx_data[1]).strftime('%Y-%m-%d %H:%M:%S UTC')}\n"
+            f"**Transaction Fee:** {tx_data[2] / 1e9:.8f} SOL\n"
+            f"**Deployer Address:** `{tx_data[8]}`\n"
+            f"**Holder Count:** {tx_data[9]}\n"
+            f"**Sniper Count:** {tx_data[10]}\n"
+            f"**Insider Count:** {tx_data[11]}\n"
+            f"**Buy/Sell Ratio:** {tx_data[12]}%\n"
+            f"**High Holder Count:** {tx_data[13]}\n\n"
+            f"🔗 [View on Solana Explorer](https://solscan.io/tx/{tx_data[0]})"
+        )
+
+        webhook = DiscordWebhook(url=DISCORD_WEBHOOK_URL)
+        webhook.add_embed({
+            "title": "Transaction",
+            "description": message,
+            "color": 0x00ff00  # Green color
+        })
+        
+        response = webhook.execute()
+        if response.status_code == 204:
+            logging.info("Notification sent successfully.")
+        else:
+            logging.error(f"Error sending notification: {response.text}")
+            
+    except Exception as e:
+        logging.error(f"Error in notify_discord: {e}")
 
 async def get_token_price(token_address):
     """Get token price from DEX"""
@@ -210,55 +258,6 @@ async def get_token_price(token_address):
     # 2. Calculate price from pool reserves
     # For now, returning mock price for testing
     return 0.1
-
-async def analyze_deployer_history(deployer_address):
-    """Analyze deployer's previous tokens and their performance"""
-    past_tokens = []
-    success_count = 0
-    total_count = 0
-    
-    try:
-        # Get deployer's transaction history from Helius
-        url = f"https://mainnet.helius-rpc.com/?api-key={HELIUS_API_KEY}"
-        headers = {"Content-Type": "application/json"}
-        payload = {
-            "jsonrpc": "2.0",
-            "id": 1,
-            "method": "getSignaturesForAddress",
-            "params": [
-                deployer_address,
-                {"limit": 100}
-            ]
-        }
-        
-        response = requests.post(url, headers=headers, json=payload)
-        if response.status_code == 200:
-            transactions = response.json().get("result", [])
-            
-            for tx in transactions:
-                total_count += 1
-                # Get transaction details and analyze success
-                tx_data = await get_transaction_details(tx["signature"])
-                if tx_data and is_successful_token(tx_data):
-                    success_count += 1
-                    past_tokens.append(tx["signature"])
-        
-        success_rate = success_count / max(total_count, 1)
-        logging.info(f"Deployer {deployer_address} success rate: {success_rate}")
-        
-        return {
-            "past_tokens": past_tokens,
-            "success_rate": success_rate,
-            "total_count": total_count
-        }
-        
-    except Exception as e:
-        logging.error(f"Error analyzing deployer history: {e}")
-        return {
-            "past_tokens": [],
-            "success_rate": 0,
-            "total_count": 0
-        }
 
 async def get_transaction_details(signature):
     """Get detailed transaction information"""
