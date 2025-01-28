@@ -580,21 +580,30 @@ class TokenScorer:
     def _get_sniper_score(self, tx_data: tuple) -> float:
         """Calculate score based on sniper and insider presence using detailed metrics"""
         try:
-            sniper_count = int(tx_data[10] or 0)
-            insider_count = int(tx_data[11] or 0)
+            # Safely parse integer values with error handling
+            def safe_int(val, default=0):
+                try:
+                    if isinstance(val, str) and '{' in val:  # Check for error JSON
+                        return default
+                    return int(val) if val is not None else default
+                except (ValueError, TypeError):
+                    return default
+
+            sniper_count = safe_int(tx_data[10])
+            insider_count = safe_int(tx_data[11])
             
             # Get detailed safety metrics
             metrics = TokenMetrics(
-                address=tx_data[0],
-                total_holders=int(tx_data[3] or 0),
-                total_supply=float(tx_data[4] or 0),
+                address=str(tx_data[0]),
+                total_holders=safe_int(tx_data[3]),
+                total_supply=float(safe_int(tx_data[4], 1)),
                 holder_balances={},
-                dev_sells=int(tx_data[9] or 0),
+                dev_sells=safe_int(tx_data[9]),
                 sniper_buys=sniper_count,
                 insider_buys=insider_count,
-                buy_count=int(tx_data[5] or 0),
-                sell_count=int(tx_data[6] or 0),
-                large_holders=int(tx_data[7] or 0)
+                buy_count=safe_int(tx_data[5]),
+                sell_count=safe_int(tx_data[6]),
+                large_holders=safe_int(tx_data[7])
             )
             
             # Use enhanced safety check
@@ -616,41 +625,46 @@ class TokenScorer:
             logging.error(f"Error in sniper score calculation: {e}")
             return 0.0
 
-    def _get_market_cap_score(self, token_address: str) -> float:
+    async def _get_market_cap_score(self, token_address: str) -> float:
         """Calculate score based on market cap growth and stability"""
         try:
             conn = sqlite3.connect(self.db_file)
-            try:
-                c = conn.cursor()
-                c.execute('''
-                    SELECT current_market_cap, peak_market_cap
-                    FROM tokens WHERE address = ?
-                ''', (token_address,))
-                result = c.fetchone()
+            c = conn.cursor()
+            
+            # Get current market cap from tokens table instead
+            c.execute('''
+                SELECT current_market_cap, peak_market_cap
+                FROM tokens 
+                WHERE address = ?
+            ''', (token_address,))
+            
+            result = c.fetchone()
+            if not result or not result[0]:
+                return 50.0  # Default score for new tokens
                 
-                if not result:
-                    return 50.0  # Neutral score for new tokens
-                    
-                current_mcap = float(result[0] or 0)
-                peak_mcap = float(result[1] or current_mcap)
+            current_mcap = float(result[0])
+            peak_mcap = float(result[1] or current_mcap)
+            
+            # Score based on market cap and stability
+            if current_mcap < 30000:
+                return 30.0
+            elif current_mcap < 100000:
+                return 50.0
+            elif current_mcap < 500000:
+                return 70.0
+            else:
+                # Add stability bonus if current is close to peak
+                base_score = 80.0
+                stability_ratio = current_mcap / peak_mcap
+                stability_bonus = stability_ratio * 20.0
+                return min(base_score + stability_bonus, 100.0)
                 
-                if current_mcap < 30000:
-                    return 30.0
-                    
-                # Score based on current market cap
-                mcap_score = min((current_mcap / 1000000) * 60, 60)
-                
-                # Stability bonus if current is close to peak
-                stability_ratio = current_mcap / max(peak_mcap, current_mcap)
-                stability_bonus = stability_ratio * 40
-                
-                return float(mcap_score + stability_bonus)
-                
-            finally:
-                conn.close()
         except Exception as e:
             logging.error(f"Error in market cap score calculation: {e}")
-            return 0.0
+            return 50.0  # Default score on error
+        finally:
+            if 'conn' in locals():
+                conn.close()
 
     async def _save_score(self, token_address: str, final_score: float, component_scores: dict):
         """Save the calculated scores to the database"""
@@ -671,103 +685,66 @@ class TokenScorer:
             ))
             conn.commit()
         finally:
-            conn.close()
+            if 'conn' in locals():
+                conn.close()
 
 def init_db():
     """Initialize database schema for token monitoring"""
     conn = sqlite3.connect(DB_FILE)
-    c = conn.cursor()
-    
-    # Transactions table for token events
-    c.execute('''
-        CREATE TABLE IF NOT EXISTS transactions (
-            signature TEXT PRIMARY KEY,
-            block_time INTEGER,
-            fee INTEGER,
-            error TEXT,
-            log_messages TEXT,
-            pre_balances TEXT,
-            post_balances TEXT,
-            token_transfers TEXT,
-            deployer_address TEXT,
-            holder_count INTEGER,
-            sniper_count INTEGER,
-            insider_count INTEGER,
-            buy_sell_ratio REAL,
-            high_holder_count INTEGER
-        )
-    ''')
-    
-    # Deployers table for tracking token creators
-    c.execute('''
-        CREATE TABLE IF NOT EXISTS deployers (
-            address TEXT PRIMARY KEY,
-            total_tokens INTEGER DEFAULT 0,
-            successful_tokens INTEGER DEFAULT 0,
-            tokens_above_3m INTEGER DEFAULT 0,
-            tokens_above_200k INTEGER DEFAULT 0,
-            last_updated INTEGER,
-            is_blacklisted BOOLEAN DEFAULT FALSE
-        )
-    ''')
-    
-    # Wallets table for tracking snipers and insiders
-    c.execute('''
-        CREATE TABLE IF NOT EXISTS wallets (
-            address TEXT PRIMARY KEY,
-            wallet_type TEXT,  -- 'sniper', 'insider', 'whale', 'normal'
-            success_rate REAL DEFAULT 0,
-            total_trades INTEGER DEFAULT 0,
-            profitable_trades INTEGER DEFAULT 0,
-            last_14d_trades INTEGER DEFAULT 0,
-            last_14d_successes INTEGER DEFAULT 0,
-            last_updated INTEGER
-        )
-    ''')
-    
-    # Tokens table for detailed token tracking
-    c.execute('''
-        CREATE TABLE IF NOT EXISTS tokens (
-            address TEXT PRIMARY KEY,
-            name TEXT,
-            symbol TEXT,
-            deployer_address TEXT,
-            launch_time INTEGER,
-            current_market_cap REAL DEFAULT 0,
-            peak_market_cap REAL DEFAULT 0,
-            holder_count INTEGER DEFAULT 0,
-            large_holder_count INTEGER DEFAULT 0,  -- holders with >8% supply
-            buy_count INTEGER DEFAULT 0,
-            sell_count INTEGER DEFAULT 0,
-            twitter_handle TEXT,
-            twitter_name_changes INTEGER DEFAULT 0,
-            sentiment_score REAL DEFAULT 0,
-            confidence_score REAL DEFAULT 0,
-            is_verified BOOLEAN DEFAULT FALSE,
-            last_updated INTEGER,
-            score_components TEXT,
-            FOREIGN KEY (deployer_address) REFERENCES deployers (address)
-        )
-    ''')
-    
-    # Top holders table
-    c.execute('''
-        CREATE TABLE IF NOT EXISTS top_holders (
-            token_address TEXT,
-            holder_address TEXT,
-            balance REAL,
-            percentage REAL,
-            win_rate_14d REAL DEFAULT 0,
-            pnl_30d REAL DEFAULT 0,
-            last_updated INTEGER,
-            PRIMARY KEY (token_address, holder_address),
-            FOREIGN KEY (token_address) REFERENCES tokens (address),
-            FOREIGN KEY (holder_address) REFERENCES wallets (address)
-        )
-    ''')
-    
-    conn.commit()
-    conn.close()
+    try:
+        c = conn.cursor()
+        
+        # Create tokens table
+        c.execute('''
+            CREATE TABLE IF NOT EXISTS tokens (
+                address TEXT PRIMARY KEY,
+                name TEXT,
+                symbol TEXT,
+                decimals INTEGER,
+                current_price REAL,
+                current_market_cap REAL,
+                peak_market_cap REAL,
+                last_updated INTEGER
+            )
+        ''')
+        
+        # Create token_market_caps table for historical data
+        c.execute('''
+            CREATE TABLE IF NOT EXISTS token_market_caps (
+                token_address TEXT,
+                market_cap REAL,
+                timestamp INTEGER,
+                PRIMARY KEY (token_address, timestamp)
+            )
+        ''')
+        
+        # Create deployer_stats table
+        c.execute('''
+            CREATE TABLE IF NOT EXISTS deployer_stats (
+                address TEXT PRIMARY KEY,
+                total_tokens INTEGER,
+                tokens_above_3m INTEGER,
+                tokens_above_200k INTEGER,
+                last_token_time INTEGER,
+                is_blacklisted BOOLEAN,
+                last_updated INTEGER,
+                failure_rate REAL
+            )
+        ''')
+        
+        # Create token_scores table
+        c.execute('''
+            CREATE TABLE IF NOT EXISTS token_scores (
+                token_address TEXT PRIMARY KEY,
+                final_score REAL,
+                component_scores TEXT,
+                last_updated INTEGER
+            )
+        ''')
+        
+        conn.commit()
+    finally:
+        conn.close()
 
 def fetch_transaction(signature):
     """Fetch transaction details from Helius API."""
