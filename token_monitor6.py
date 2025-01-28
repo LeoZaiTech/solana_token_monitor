@@ -716,50 +716,19 @@ def main():
         parsed_data = parse_transaction_data(tx_data)
         if parsed_data:
             save_transaction_to_db(parsed_data)
+            
+            # Send notification immediately for testing
+            notify_discord(parsed_data)
+            logging.info("Test notification sent.")
 
             deployer_address = parsed_data[8]
             token_address = 'TestToken123'  # In real implementation, extract from tx_data
-
-            # Insert basic token data first
-            conn = sqlite3.connect(DB_FILE)
-            try:
-                c = conn.cursor()
-                c.execute('''
-                    INSERT INTO tokens (
-                        address, deployer_address, launch_time, 
-                        current_market_cap, peak_market_cap,
-                        score_components
-                    ) VALUES (?, ?, ?, ?, ?, ?)
-                    ON CONFLICT(address) DO UPDATE SET
-                        deployer_address = excluded.deployer_address,
-                        launch_time = excluded.launch_time,
-                        score_components = excluded.score_components
-                ''', (
-                    token_address, 
-                    deployer_address, 
-                    int(datetime.now().timestamp()),
-                    30000,  # Starting with minimum required mcap
-                    30000,
-                    '{}'  # Empty JSON object for score components
-                ))
-                conn.commit()
-            except sqlite3.Error as e:
-                logging.error(f"Database error: {e}")
-            finally:
-                conn.close()
 
             # Calculate and log token score
             scorer = TokenScorer(DB_FILE)
             try:
                 score = asyncio.run(scorer.calculate_token_score(token_address, parsed_data))
                 logging.info(f"Token confidence score: {score:.2f}/100")
-                
-                # Convert score to float and compare
-                if float(score) >= 60.0:
-                    notify_discord(parsed_data)
-                    logging.info("High-confidence token detected, notification sent.")
-                else:
-                    logging.info("Token score below threshold, skipping notification.")
                     
             except Exception as e:
                 logging.error(f"Error calculating token score: {e}")
