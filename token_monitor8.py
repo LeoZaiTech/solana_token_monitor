@@ -11,6 +11,7 @@ import asyncio
 from dataclasses import dataclass
 from typing import Dict, List, Optional, Tuple
 import aiohttp
+from collections import defaultdict, Counter
 
 # Load environment variables
 load_dotenv()
@@ -687,6 +688,306 @@ class TokenScorer:
         finally:
             if 'conn' in locals():
                 conn.close()
+
+class VolumeAnalyzer:
+    """Analyzes trading volume patterns to detect manipulation."""
+    
+    def __init__(self, db_file: str):
+        self.db_file = db_file
+        self._init_db()
+        
+    def _init_db(self):
+        """Initialize database tables for volume analysis."""
+        conn = sqlite3.connect(self.db_file)
+        try:
+            c = conn.cursor()
+            
+            # Create trades table for detailed trade analysis
+            c.execute('''
+                CREATE TABLE IF NOT EXISTS token_trades (
+                    tx_signature TEXT PRIMARY KEY,
+                    token_address TEXT,
+                    from_address TEXT,
+                    to_address TEXT,
+                    amount REAL,
+                    timestamp INTEGER,
+                    price REAL,
+                    FOREIGN KEY (token_address) REFERENCES tokens(address)
+                )
+            ''')
+            
+            conn.commit()
+        except sqlite3.Error as e:
+            logging.error(f"Database error in VolumeAnalyzer: {e}")
+        finally:
+            conn.close()
+            
+    async def analyze_volume(self, token_address: str, recent_trades: List[Dict]) -> Dict[str, float]:
+        """
+        Analyze trading patterns to detect fake volume.
+        Returns a dictionary of manipulation scores (0-1, higher is more suspicious).
+        """
+        try:
+            scores = {
+                'circular_trading': await self._detect_circular_trading(recent_trades),
+                'time_pattern': await self._detect_time_patterns(recent_trades),
+                'size_pattern': await self._detect_size_patterns(recent_trades),
+                'wash_trading': await self._detect_wash_trading(recent_trades)
+            }
+            
+            # Save trades for historical analysis
+            await self._save_trades(token_address, recent_trades)
+            
+            return scores
+            
+        except Exception as e:
+            logging.error(f"Error in analyze_volume: {e}")
+            return {'error': 1.0}
+            
+    async def _detect_circular_trading(self, trades: List[Dict]) -> float:
+        """Detect tokens being passed between related wallets."""
+        try:
+            trade_graph = defaultdict(set)
+            wallet_groups = []
+            
+            # Build trade graph
+            for trade in trades:
+                trade_graph[trade['from_address']].add(trade['to_address'])
+                
+            # Find circular patterns (groups of wallets trading among themselves)
+            visited = set()
+            
+            def find_group(wallet, current_group):
+                if wallet in visited:
+                    return
+                visited.add(wallet)
+                current_group.add(wallet)
+                for connected in trade_graph[wallet]:
+                    find_group(connected, current_group)
+            
+            for wallet in trade_graph:
+                if wallet not in visited:
+                    group = set()
+                    find_group(wallet, group)
+                    if len(group) > 1:
+                        wallet_groups.append(group)
+            
+            # Calculate suspicion score based on group sizes and trade frequency
+            if not wallet_groups:
+                return 0.0
+                
+            max_group_size = max(len(group) for group in wallet_groups)
+            avg_group_size = sum(len(group) for group in wallet_groups) / len(wallet_groups)
+            
+            # More suspicious if there are larger groups of wallets trading among themselves
+            return min(1.0, (avg_group_size / 3) * (max_group_size / 5))
+            
+        except Exception as e:
+            logging.error(f"Error in _detect_circular_trading: {e}")
+            return 1.0
+            
+    async def _detect_time_patterns(self, trades: List[Dict]) -> float:
+        """Detect suspicious regularity in trade timing."""
+        try:
+            if len(trades) < 3:
+                return 0.0
+                
+            # Calculate time differences between consecutive trades
+            time_diffs = []
+            for i in range(1, len(trades)):
+                diff = trades[i]['timestamp'] - trades[i-1]['timestamp']
+                time_diffs.append(diff)
+            
+            # Check for suspicious patterns in time differences
+            avg_diff = sum(time_diffs) / len(time_diffs)
+            variance = sum((d - avg_diff) ** 2 for d in time_diffs) / len(time_diffs)
+            std_dev = variance ** 0.5
+            
+            # More suspicious if time differences are too regular (low standard deviation)
+            regularity_score = 1.0 - min(1.0, (std_dev / avg_diff))
+            
+            return regularity_score
+            
+        except Exception as e:
+            logging.error(f"Error in _detect_time_patterns: {e}")
+            return 1.0
+            
+    async def _detect_size_patterns(self, trades: List[Dict]) -> float:
+        """Detect suspicious patterns in trade sizes."""
+        try:
+            if len(trades) < 3:
+                return 0.0
+                
+            # Count occurrences of each trade size
+            size_counts = Counter(trade['amount'] for trade in trades)
+            
+            # Calculate what percentage of trades are duplicates
+            total_trades = len(trades)
+            duplicate_trades = sum(count - 1 for count in size_counts.values() if count > 1)
+            
+            return min(1.0, duplicate_trades / total_trades)
+            
+        except Exception as e:
+            logging.error(f"Error in _detect_size_patterns: {e}")
+            return 1.0
+            
+    async def _detect_wash_trading(self, trades: List[Dict]) -> float:
+        """Detect same wallet trading with itself through different routes."""
+        try:
+            wallet_volume = defaultdict(float)
+            wallet_trades = defaultdict(int)
+            
+            for trade in trades:
+                wallet_volume[trade['from_address']] += trade['amount']
+                wallet_volume[trade['to_address']] += trade['amount']
+                wallet_trades[trade['from_address']] += 1
+                wallet_trades[trade['to_address']] += 1
+            
+            # Calculate concentration of volume in top wallets
+            total_volume = sum(wallet_volume.values())
+            if total_volume == 0:
+                return 0.0
+                
+            top_wallets = sorted(wallet_volume.items(), key=lambda x: x[1], reverse=True)[:3]
+            top_volume = sum(vol for _, vol in top_wallets)
+            
+            # More suspicious if few wallets account for most volume
+            concentration_score = top_volume / total_volume
+            
+            return concentration_score
+            
+        except Exception as e:
+            logging.error(f"Error in _detect_wash_trading: {e}")
+            return 1.0
+            
+    async def _save_trades(self, token_address: str, trades: List[Dict]):
+        """Save trade data for historical analysis."""
+        conn = sqlite3.connect(self.db_file)
+        try:
+            c = conn.cursor()
+            for trade in trades:
+                c.execute('''
+                    INSERT OR REPLACE INTO token_trades 
+                    (tx_signature, token_address, from_address, to_address, amount, timestamp, price)
+                    VALUES (?, ?, ?, ?, ?, ?, ?)
+                ''', (
+                    trade['signature'],
+                    token_address,
+                    trade['from_address'],
+                    trade['to_address'],
+                    trade['amount'],
+                    trade['timestamp'],
+                    trade.get('price', 0)
+                ))
+            conn.commit()
+        except sqlite3.Error as e:
+            logging.error(f"Database error in _save_trades: {e}")
+        finally:
+            conn.close()
+
+    def is_volume_suspicious(self, scores: Dict[str, float]) -> Tuple[bool, float]:
+        """
+        Determine if the volume patterns are suspicious.
+        Returns (is_suspicious, confidence_score).
+        """
+        if 'error' in scores:
+            return True, 1.0
+            
+        # Weight the different types of manipulation
+        weights = {
+            'circular_trading': 0.3,
+            'time_pattern': 0.2,
+            'size_pattern': 0.2,
+            'wash_trading': 0.3
+        }
+        
+        # Calculate weighted average
+        weighted_score = sum(scores[k] * weights[k] for k in weights)
+        
+        # Consider volume suspicious if weighted score is above 0.6
+        return weighted_score > 0.6, weighted_score
+
+class TokenSafetyChecker:
+    def __init__(self, db_file: str):
+        self.db_file = db_file
+        self.volume_analyzer = VolumeAnalyzer(db_file)
+        
+    async def check_token_safety(self, token_address: str, metrics: TokenMetrics) -> Dict[str, float]:
+        """Comprehensive token safety check including volume analysis"""
+        scores = {
+            'holder_score': self._check_holder_distribution(metrics),
+            'transaction_score': self._check_transaction_patterns(metrics),
+            'sniper_score': self._check_sniper_presence(metrics),
+            'insider_score': self._check_insider_presence(metrics)
+        }
+        
+        # Get recent trades for volume analysis
+        recent_trades = await self._get_recent_trades(token_address)
+        volume_scores = await self.volume_analyzer.analyze_volume(token_address, recent_trades)
+        
+        # Combine volume analysis with other scores
+        is_suspicious, volume_score = self.volume_analyzer.is_volume_suspicious(volume_scores)
+        scores['volume_score'] = 1.0 - volume_score  # Invert so higher is better
+        
+        # Add detailed volume metrics
+        scores.update({
+            f"volume_{k}": 1.0 - v  # Invert so higher is better
+            for k, v in volume_scores.items()
+            if k != 'error'
+        })
+        
+        return scores
+        
+    async def _get_recent_trades(self, token_address: str) -> List[Dict]:
+        """Fetch recent trades for the token from our database."""
+        conn = sqlite3.connect(self.db_file)
+        try:
+            c = conn.cursor()
+            c.execute('''
+                SELECT tx_signature, from_address, to_address, amount, timestamp, price
+                FROM token_trades
+                WHERE token_address = ?
+                ORDER BY timestamp DESC
+                LIMIT 100
+            ''', (token_address,))
+            
+            trades = []
+            for row in c.fetchall():
+                trades.append({
+                    'signature': row[0],
+                    'from_address': row[1],
+                    'to_address': row[2],
+                    'amount': row[3],
+                    'timestamp': row[4],
+                    'price': row[5]
+                })
+            return trades
+            
+        except sqlite3.Error as e:
+            logging.error(f"Database error in _get_recent_trades: {e}")
+            return []
+        finally:
+            conn.close()
+
+    def _check_holder_distribution(self, metrics: TokenMetrics) -> float:
+        """Check if holder distribution is suspicious"""
+        # Implement your logic here
+        return 1.0
+
+    def _check_transaction_patterns(self, metrics: TokenMetrics) -> float:
+        """Check if transaction patterns are suspicious"""
+        # Implement your logic here
+        return 1.0
+
+    def _check_sniper_presence(self, metrics: TokenMetrics) -> float:
+        """Check if sniper presence is suspicious"""
+        # Implement your logic here
+        return 1.0
+
+    def _check_insider_presence(self, metrics: TokenMetrics) -> float:
+        """Check if insider presence is suspicious"""
+        # Implement your logic here
+        return 1.0
 
 def init_db():
     """Initialize database schema for token monitoring"""
