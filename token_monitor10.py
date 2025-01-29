@@ -982,22 +982,25 @@ class PumpFunMonitor:
     
     def __init__(self, db_file: str):
         self.db_file = db_file
-        self.helius_url = f"https://api.helius.xyz/v1?api-key={HELIUS_API_KEY}"
-        self.known_tokens = set()  # Cache of processed tokens
+        self.ws_url = f"wss://mainnet.helius-rpc.com/?api-key={HELIUS_API_KEY}"
         self.init_db()
-        
+    
     def init_db(self):
         """Initialize database tables"""
         conn = sqlite3.connect(self.db_file)
         c = conn.cursor()
         
+        # Create tables with all required columns
         c.execute('''
             CREATE TABLE IF NOT EXISTS tokens (
                 address TEXT PRIMARY KEY,
-                deployer_address TEXT,
-                creation_time INTEGER,
-                market_cap REAL DEFAULT 0,
-                peak_market_cap REAL DEFAULT 0
+                name TEXT,
+                symbol TEXT,
+                decimals INTEGER,
+                current_price REAL,
+                current_market_cap REAL,
+                peak_market_cap REAL,
+                last_updated INTEGER
             )
         ''')
         
@@ -1012,102 +1015,108 @@ class PumpFunMonitor:
             )
         ''')
         
+        c.execute('''
+            CREATE TABLE IF NOT EXISTS trades (
+                signature TEXT PRIMARY KEY,
+                token_address TEXT,
+                from_address TEXT,
+                to_address TEXT,
+                amount REAL,
+                timestamp INTEGER,
+                is_buy BOOLEAN,
+                FOREIGN KEY (token_address) REFERENCES tokens(address)
+            )
+        ''')
+        
         conn.commit()
         conn.close()
-
-    async def start_monitoring(self):
-        """Start monitoring pump.fun tokens"""
-        logging.info("Starting pump.fun token monitoring...")
+    
+    async def subscribe_to_program(self):
+        """Subscribe to pump.fun program transactions via WebSocket"""
+        logging.info("Starting WebSocket connection...")
         while True:
             try:
-                await self.check_new_tokens()
-                await asyncio.sleep(10)  # Check every 10 seconds
+                async with websockets.connect(self.ws_url) as websocket:
+                    subscribe_msg = {
+                        "jsonrpc": "2.0",
+                        "id": 1,
+                        "method": "programSubscribe",  # Changed from blockSubscribe
+                        "params": [
+                            PUMP_FUN_PROGRAM_ID,
+                            {
+                                "encoding": "jsonParsed",
+                                "commitment": "confirmed",
+                                "filters": [
+                                    {
+                                        "memcmp": {
+                                            "offset": 0,
+                                            "bytes": CREATE_INSTRUCTION_DISCRIMINATOR
+                                        }
+                                    }
+                                ]
+                            }
+                        ]
+                    }
+                    
+                    await websocket.send(json.dumps(subscribe_msg))
+                    logging.info(f"Subscribed to pump.fun program: {PUMP_FUN_PROGRAM_ID}")
+                    
+                    while True:
+                        try:
+                            response = await websocket.recv()
+                            data = json.loads(response)
+                            logging.debug(f"Received data: {json.dumps(data, indent=2)}")
+                            
+                            if "params" in data and "result" in data["params"]:
+                                tx = data["params"]["result"]["value"]
+                                if "transaction" in tx:
+                                    if self.is_pump_fun_creation(tx):
+                                        logging.info(f"Found pump.fun creation transaction!")
+                                        await self.handle_new_token(tx)
+                                        
+                        except json.JSONDecodeError as e:
+                            logging.error(f"Error decoding WebSocket message: {e}")
+                            continue
+                            
             except Exception as e:
-                logging.error(f"Error in monitoring loop: {e}")
-                await asyncio.sleep(30)  # Wait longer on error
-                
-    async def check_new_tokens(self):
-        """Check for new pump.fun tokens"""
+                logging.error(f"WebSocket connection error: {e}")
+                logging.info("Attempting to reconnect in 5 seconds...")
+                await asyncio.sleep(5)
+                continue
+    
+    def is_pump_fun_creation(self, tx):
+        """Check if transaction is a pump.fun token creation"""
         try:
-            async with aiohttp.ClientSession() as session:
-                async with session.post(self.helius_url, json={
-                    "jsonrpc": "2.0",
-                    "id": "1",
-                    "method": "getAssetsByGroup",
-                    "params": {
-                        "groupKey": "collection",
-                        "groupValue": PUMP_FUN_PROGRAM_ID,
-                        "page": 1,
-                        "limit": 100
-                    }
-                }) as response:
-                    if response.status == 200:
-                        data = await response.json()
-                        if "result" in data:
-                            tokens = data["result"]
-                            logging.info(f"Found {len(tokens)} pump.fun tokens")
-                            
-                            for token in tokens:
-                                token_address = token["id"]
-                                if token_address not in self.known_tokens:
-                                    logging.info(f"New token found: {token_address}")
-                                    await self.process_new_token(token)
-                                    self.known_tokens.add(token_address)
-                    else:
-                        logging.error(f"API request failed: {response.status}")
-                        
-        except Exception as e:
-            logging.error(f"Error checking new tokens: {e}")
+            # Check if transaction involves pump.fun program
+            program_found = False
+            for account in tx["transaction"]["message"]["accountKeys"]:
+                if account["pubkey"] == PUMP_FUN_PROGRAM_ID:
+                    program_found = True
+                    break
             
-    async def process_new_token(self, token_data):
-        """Process a newly discovered token"""
-        try:
-            token_address = token_data["id"]
-            # Get token metadata
-            async with aiohttp.ClientSession() as session:
-                async with session.post(self.helius_url, json={
-                    "jsonrpc": "2.0",
-                    "id": "1",
-                    "method": "getAsset",
-                    "params": {
-                        "id": token_address
-                    }
-                }) as response:
-                    if response.status == 200:
-                        data = await response.json()
-                        if "result" in data:
-                            metadata = data["result"]
-                            deployer_address = metadata.get("ownership", {}).get("owner")
-                            
-                            if deployer_address:
-                                # Save to database
-                                conn = sqlite3.connect(self.db_file)
-                                c = conn.cursor()
-                                
-                                c.execute('''
-                                    INSERT OR IGNORE INTO tokens 
-                                    (address, deployer_address, creation_time) 
-                                    VALUES (?, ?, ?)
-                                ''', (token_address, deployer_address, int(time.time())))
-                                
-                                conn.commit()
-                                conn.close()
-                                
-                                # Start monitoring this token
-                                asyncio.create_task(self.monitor_token(token_address))
-                                logging.info(f"Started monitoring token: {token_address}")
-                            
+            if not program_found:
+                return False
+            
+            # Look for create instruction in inner instructions
+            if "meta" in tx and "innerInstructions" in tx["meta"]:
+                for ix in tx["meta"]["innerInstructions"]:
+                    if "instructions" in ix:
+                        for instruction in ix["instructions"]:
+                            # Log the instruction data for debugging
+                            logging.debug(f"Instruction data: {json.dumps(instruction, indent=2)}")
+                            if "data" in instruction and CREATE_INSTRUCTION_DISCRIMINATOR in instruction["data"]:
+                                logging.info("Found create instruction")
+                                return True
+            
+            return False
+            
         except Exception as e:
-            logging.error(f"Error processing new token: {e}")
-
-    async def monitor_token(self, token_address: str):
-        """Monitor a token for updates"""
-        # Implement your logic here
-        pass
+            logging.error(f"Error checking pump.fun creation: {e}")
+            return False
 
 async def main():
     """Main entry point"""
-    # Configure logging
+    # Configure more detailed logging
     logging.basicConfig(
         level=logging.INFO,
         format='%(asctime)s - %(levelname)s - %(message)s',
@@ -1119,7 +1128,7 @@ async def main():
     
     monitor = PumpFunMonitor(DB_FILE)
     try:
-        await monitor.start_monitoring()
+        await monitor.subscribe_to_program()
     except KeyboardInterrupt:
         logging.info("Shutting down monitor...")
     except Exception as e:

@@ -989,6 +989,67 @@ class TokenSafetyChecker:
         # Implement your logic here
         return 1.0
 
+class PriceAlert:
+    def __init__(self, token_address: str, target_price: float, is_above: bool = True):
+        self.token_address = token_address
+        self.target_price = target_price
+        self.is_above = is_above  # True for price above target, False for below
+        self.triggered = False
+
+class TokenMonitor:
+    def __init__(self, db_file: str):
+        self.db_file = db_file
+        self.price_alerts: Dict[str, List[PriceAlert]] = {}
+        self.init_db()
+    
+    def add_price_alert(self, token_address: str, target_price: float, is_above: bool = True):
+        """Add a price alert for a token"""
+        if token_address not in self.price_alerts:
+            self.price_alerts[token_address] = []
+        alert = PriceAlert(token_address, target_price, is_above)
+        self.price_alerts[token_address].append(alert)
+        logging.info(f"Added price alert for {token_address}: {'above' if is_above else 'below'} {target_price}")
+    
+    async def check_price_alerts(self, token_address: str, current_price: float):
+        """Check if any price alerts have been triggered"""
+        if token_address not in self.price_alerts:
+            return
+            
+        for alert in self.price_alerts[token_address]:
+            if alert.triggered:
+                continue
+                
+            triggered = False
+            if alert.is_above and current_price > alert.target_price:
+                triggered = True
+            elif not alert.is_above and current_price < alert.target_price:
+                triggered = True
+                
+            if triggered:
+                alert.triggered = True
+                await self.send_price_alert(token_address, current_price, alert.target_price, alert.is_above)
+    
+    async def send_price_alert(self, token_address: str, current_price: float, target_price: float, was_above: bool):
+        """Send price alert notification"""
+        message = (
+            f"🚨 **Price Alert!**\n\n"
+            f"**Token:** `{token_address}`\n"
+            f"**Current Price:** ${current_price:.6f}\n"
+            f"**Target {'Above' if was_above else 'Below'}:** ${target_price:.6f}\n\n"
+            f"🔗 [View on Solscan](https://solscan.io/token/{token_address})"
+        )
+        
+        webhook = DiscordWebhook(url=DISCORD_WEBHOOK_URL)
+        webhook.add_embed({
+            "title": "Price Alert Triggered",
+            "description": message,
+            "color": 0x00ff00 if was_above else 0xff0000
+        })
+        
+        response = webhook.execute()
+        if response.status_code != 204:
+            logging.error(f"Error sending price alert: {response.text}")
+
 def init_db():
     """Initialize database schema for token monitoring"""
     conn = sqlite3.connect(DB_FILE)
