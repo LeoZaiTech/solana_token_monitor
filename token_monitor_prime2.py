@@ -304,14 +304,23 @@ class HolderAnalyzer:
             conn.close()
 
 class DeployerStats:
-    address: str
-    total_tokens: int
-    tokens_above_3m: int
-    tokens_above_200k: int
-    last_token_time: int
-    is_blacklisted: bool
-    last_updated: int
-    failure_rate: float
+    def __init__(self, address: str, total_tokens: int = 0, tokens_above_3m: int = 0,
+                 tokens_above_200k: int = 0, last_token_time: int = 0,
+                 is_blacklisted: bool = False, last_updated: int = 0,
+                 failure_rate: float = 0.0):
+        self.address = address
+        self.total_tokens = total_tokens
+        self.tokens_above_3m = tokens_above_3m
+        self.tokens_above_200k = tokens_above_200k
+        self.last_token_time = last_token_time
+        self.is_blacklisted = is_blacklisted
+        self.last_updated = last_updated
+        self.failure_rate = failure_rate
+
+    def __str__(self) -> str:
+        """String representation for logging and debugging"""
+        return (f"DeployerStats(address={self.address}, total_tokens={self.total_tokens}, "
+                f"tokens_above_3m={self.tokens_above_3m}, failure_rate={self.failure_rate:.2f})")
 
 class DeployerAnalyzer:
     def __init__(self, db_file: str):
