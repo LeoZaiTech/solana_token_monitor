@@ -52,12 +52,11 @@ class HolderAnalyzer:
 
     def _init_db(self):
         """Initialize database tables for holder analysis"""
-        conn = sqlite3.connect(self.db_file)
-        try:
-            c = conn.cursor()
+        with sqlite3.connect(self.db_file) as conn:
+            cursor = conn.cursor()
             
             # Create holders table
-            c.execute('''
+            cursor.execute('''
                 CREATE TABLE IF NOT EXISTS holders (
                     token_address TEXT,
                     holder_address TEXT,
@@ -68,7 +67,7 @@ class HolderAnalyzer:
             ''')
             
             # Create wallet_labels table
-            c.execute('''
+            cursor.execute('''
                 CREATE TABLE IF NOT EXISTS wallet_labels (
                     address TEXT PRIMARY KEY,
                     label TEXT,  -- 'sniper', 'insider', 'developer'
@@ -78,10 +77,6 @@ class HolderAnalyzer:
             ''')
             
             conn.commit()
-        except sqlite3.Error as e:
-            logging.error(f"Database error: {e}")
-        finally:
-            conn.close()
 
     async def analyze_token_metrics(self, token_address: str, deployer_address: str) -> TokenMetrics:
         """Analyze token holder metrics and transaction patterns"""
@@ -317,12 +312,11 @@ class DeployerAnalyzer:
 
     def _init_db(self):
         """Initialize database tables"""
-        conn = sqlite3.connect(self.db_file)
-        try:
-            c = conn.cursor()
+        with sqlite3.connect(self.db_file) as conn:
+            cursor = conn.cursor()
             
             # Create deployers table if not exists
-            c.execute('''
+            cursor.execute('''
                 CREATE TABLE IF NOT EXISTS deployers (
                     address TEXT PRIMARY KEY,
                     total_tokens INTEGER DEFAULT 0,
@@ -336,7 +330,7 @@ class DeployerAnalyzer:
             ''')
 
             # Create tokens table if not exists
-            c.execute('''
+            cursor.execute('''
                 CREATE TABLE IF NOT EXISTS tokens (
                     address TEXT PRIMARY KEY,
                     name TEXT,
@@ -361,8 +355,6 @@ class DeployerAnalyzer:
             ''')
             
             conn.commit()
-        finally:
-            conn.close()
 
     async def analyze_deployer(self, deployer_address: str) -> DeployerStats:
         """Analyze deployer's history and update stats"""
@@ -1132,12 +1124,11 @@ class VolumeAnalyzer:
         
     def _init_db(self):
         """Initialize database tables for volume analysis."""
-        conn = sqlite3.connect(self.db_file)
-        try:
-            c = conn.cursor()
+        with sqlite3.connect(self.db_file) as conn:
+            cursor = conn.cursor()
             
             # Create trades table for detailed trade analysis
-            c.execute('''
+            cursor.execute('''
                 CREATE TABLE IF NOT EXISTS token_trades (
                     tx_signature TEXT PRIMARY KEY,
                     token_address TEXT,
@@ -1151,10 +1142,6 @@ class VolumeAnalyzer:
             ''')
             
             conn.commit()
-        except sqlite3.Error as e:
-            logging.error(f"Database error in VolumeAnalyzer: {e}")
-        finally:
-            conn.close()
             
     async def analyze_volume(self, token_address: str, recent_trades: List[Dict]) -> Dict[str, float]:
         """
@@ -1596,6 +1583,107 @@ class TokenMonitor:
             'final_score': score
         })
 
+    def init_db(self):
+        """Initialize database tables"""
+        with sqlite3.connect(self.db_file) as conn:
+            cursor = conn.cursor()
+            
+            # Create tokens table
+            cursor.execute('''
+                CREATE TABLE IF NOT EXISTS tokens (
+                    address TEXT PRIMARY KEY,
+                    deployer_address TEXT,
+                    creation_time INTEGER,
+                    total_supply REAL,
+                    holder_count INTEGER,
+                    market_cap REAL,
+                    last_updated INTEGER
+                )
+            ''')
+            
+            # Create transactions table
+            cursor.execute('''
+                CREATE TABLE IF NOT EXISTS transactions (
+                    signature TEXT PRIMARY KEY,
+                    token_address TEXT,
+                    block_time INTEGER,
+                    type TEXT,
+                    amount REAL,
+                    FOREIGN KEY (token_address) REFERENCES tokens(token_address)
+                )
+            ''')
+            
+            # Create deployers table
+            cursor.execute('''
+                CREATE TABLE IF NOT EXISTS deployers (
+                    address TEXT PRIMARY KEY,
+                    total_tokens INTEGER DEFAULT 0,
+                    tokens_above_3m INTEGER DEFAULT 0,
+                    tokens_above_200k INTEGER DEFAULT 0,
+                    last_token_time INTEGER,
+                    is_blacklisted BOOLEAN DEFAULT 0,
+                    last_updated INTEGER,
+                    failure_rate REAL DEFAULT 0
+                )
+            ''')
+            
+            # Create wallet_labels table
+            cursor.execute('''
+                CREATE TABLE IF NOT EXISTS wallet_labels (
+                    address TEXT PRIMARY KEY,
+                    label_type TEXT,  -- 'sniper', 'insider', 'notable'
+                    confidence REAL,
+                    last_updated INTEGER,
+                    notes TEXT
+                )
+            ''')
+            
+            conn.commit()
+
+    async def get_token_data(self, token_address: str) -> Dict:
+        """Get token data from database"""
+        conn = sqlite3.connect(self.db_file)
+        try:
+            c = conn.cursor()
+            c.execute('SELECT * FROM tokens WHERE address = ?', (token_address,))
+            row = c.fetchone()
+            if row:
+                return {
+                    'address': row[0],
+                    'deployer': row[1],
+                    'creation_time': row[2],
+                    'total_supply': row[3],
+                    'holder_count': row[4],
+                    'market_cap': row[5],
+                    'last_updated': row[6]
+                }
+        finally:
+            conn.close()
+        return None
+
+    async def save_analysis_results(self, token_address: str, results: Dict):
+        """Save analysis results to database"""
+        conn = sqlite3.connect(self.db_file)
+        try:
+            c = conn.cursor()
+            c.execute('''
+                INSERT OR REPLACE INTO tokens 
+                (address, deployer_address, creation_time, total_supply, 
+                 holder_count, market_cap, last_updated)
+                VALUES (?, ?, ?, ?, ?, ?, ?)
+            ''', (
+                token_address,
+                results['deployer_score']['address'],
+                results['deployer_score']['last_token_time'],
+                results['holder_metrics']['total_supply'],
+                results['holder_metrics']['total_holders'],
+                results['volume_analysis']['market_cap'],
+                int(datetime.now().timestamp())
+            ))
+            conn.commit()
+        finally:
+            conn.close()
+
 class WalletTracker:
     """Tracks and manages blacklisted and notable wallets"""
     
@@ -1605,12 +1693,11 @@ class WalletTracker:
         
     def init_db(self):
         """Initialize wallet tracking tables"""
-        conn = sqlite3.connect(self.db_file)
-        try:
-            c = conn.cursor()
+        with sqlite3.connect(self.db_file) as conn:
+            cursor = conn.cursor()
             
             # Blacklisted wallets table
-            c.execute("""
+            cursor.execute("""
                 CREATE TABLE IF NOT EXISTS blacklisted_wallets (
                     address TEXT PRIMARY KEY,
                     reason TEXT,
@@ -1622,7 +1709,7 @@ class WalletTracker:
             """)
             
             # Notable wallets table (good performers)
-            c.execute("""
+            cursor.execute("""
                 CREATE TABLE IF NOT EXISTS notable_wallets (
                     address TEXT PRIMARY KEY,
                     category TEXT,  -- 'trader', 'developer', 'insider'
@@ -1635,7 +1722,7 @@ class WalletTracker:
             """)
             
             # Wallet performance history
-            c.execute("""
+            cursor.execute("""
                 CREATE TABLE IF NOT EXISTS wallet_performance (
                     address TEXT,
                     token_address TEXT,
@@ -1649,8 +1736,6 @@ class WalletTracker:
             """)
             
             conn.commit()
-        finally:
-            conn.close()
             
     async def add_to_blacklist(self, address: str, reason: str, 
                               evidence: str, confidence: float = 1.0) -> bool:
@@ -1833,64 +1918,60 @@ class WalletTracker:
 
 def init_db():
     """Initialize SQLite database with required tables"""
-    conn = sqlite3.connect(DB_FILE)
-    c = conn.cursor()
-    
-    # Create tables if they don't exist
-    c.execute("""
-        CREATE TABLE IF NOT EXISTS tokens (
-            address TEXT PRIMARY KEY,
-            deployer_address TEXT,
-            max_market_cap REAL,
-            creation_time INTEGER,
-            twitter_handle TEXT,
-            twitter_name_changes INTEGER DEFAULT 0
-        )
-    """)
-    
-    c.execute("""
-        CREATE TABLE IF NOT EXISTS token_holders (
-            token_address TEXT,
-            holder_address TEXT,
-            balance REAL,
-            last_updated INTEGER,
-            PRIMARY KEY (token_address, holder_address)
-        )
-    """)
-    
-    c.execute("""
-        CREATE TABLE IF NOT EXISTS transactions (
-            signature TEXT PRIMARY KEY,
-            token_address TEXT,
-            transaction_type TEXT,
-            amount REAL,
-            price REAL,
-            timestamp INTEGER,
-            buyer_address TEXT,
-            seller_address TEXT
-        )
-    """)
-    
-    c.execute("""
-        CREATE TABLE IF NOT EXISTS known_snipers (
-            address TEXT PRIMARY KEY,
-            detection_time INTEGER,
-            confidence_score REAL,
-            detection_reason TEXT
-        )
-    """)
-    
-    c.execute("""
-        CREATE TABLE IF NOT EXISTS known_insiders (
-            address TEXT PRIMARY KEY,
-            detection_time INTEGER,
-            confidence_score REAL,
-            detection_reason TEXT
-        )
-    """)
-    
-    conn.commit()
-    conn.close()
+    with sqlite3.connect(DB_FILE) as conn:
+        cursor = conn.cursor()
+        
+        # Create tokens table
+        cursor.execute('''
+            CREATE TABLE IF NOT EXISTS tokens (
+                token_address TEXT PRIMARY KEY,
+                deployer_address TEXT,
+                creation_time INTEGER,
+                total_supply REAL,
+                holder_count INTEGER,
+                market_cap REAL,
+                last_updated INTEGER
+            )
+        ''')
+        
+        # Create transactions table
+        cursor.execute('''
+            CREATE TABLE IF NOT EXISTS transactions (
+                signature TEXT PRIMARY KEY,
+                token_address TEXT,
+                block_time INTEGER,
+                type TEXT,
+                amount REAL,
+                FOREIGN KEY (token_address) REFERENCES tokens(token_address)
+            )
+        ''')
+        
+        # Create deployers table
+        cursor.execute('''
+            CREATE TABLE IF NOT EXISTS deployers (
+                address TEXT PRIMARY KEY,
+                total_tokens INTEGER DEFAULT 0,
+                tokens_above_3m INTEGER DEFAULT 0,
+                tokens_above_200k INTEGER DEFAULT 0,
+                last_token_time INTEGER,
+                is_blacklisted BOOLEAN DEFAULT 0,
+                last_updated INTEGER,
+                failure_rate REAL DEFAULT 0
+            )
+        ''')
+        
+        # Create wallet_labels table
+        cursor.execute('''
+            CREATE TABLE IF NOT EXISTS wallet_labels (
+                address TEXT PRIMARY KEY,
+                label_type TEXT,  -- 'sniper', 'insider', 'notable'
+                confidence REAL,
+                last_updated INTEGER,
+                notes TEXT
+            )
+        ''')
+        
+        conn.commit()
 
 def fetch_transaction(signature):
     """Fetch transaction details from Helius API."""
@@ -2143,12 +2224,11 @@ class WebSocketMonitor:
 
     def _init_db(self):
         """Initialize database tables for WebSocket monitoring"""
-        conn = sqlite3.connect(self.db_file)
-        try:
-            c = conn.cursor()
+        with sqlite3.connect(self.db_file) as conn:
+            cursor = conn.cursor()
             
             # Create transactions table
-            c.execute('''
+            cursor.execute('''
                 CREATE TABLE IF NOT EXISTS transactions (
                     signature TEXT PRIMARY KEY,
                     block_time INTEGER,
@@ -2168,10 +2248,6 @@ class WebSocketMonitor:
             ''')
             
             conn.commit()
-        except sqlite3.Error as e:
-            logging.error(f"Database error in WebSocketMonitor: {e}")
-        finally:
-            conn.close()
 
     def _start_websocket(self):
         """Start the WebSocket connection"""
