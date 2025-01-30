@@ -562,10 +562,206 @@ class TwitterAnalyzer:
                 if response.status == 200:
                     data = await response.json()
                     return data.get('data', [])
-                return []
         except Exception as e:
             logging.error(f"Error fetching tweets: {e}")
             return []
+
+class HolderAnalyzer:
+    """Analyzes token holders and transactions"""
+    def __init__(self, helius_api_key: str):
+        self.helius_api_key = helius_api_key
+        self.api_url = "https://mainnet.helius-rpc.com/?api-key=" + helius_api_key
+        
+    async def analyze_holders(self, token_address: str, deployer_address: str) -> Dict:
+        """
+        Comprehensive holder and transaction analysis:
+        - Developer token sales
+        - Sniper/insider detection
+        - Buy/sell ratio
+        - Large holder concentration
+        """
+        try:
+            # Get token holders
+            holders = await self._get_token_holders(token_address)
+            if not holders:
+                return self._get_empty_result()
+                
+            total_supply = sum(h['amount'] for h in holders)
+            
+            # Check developer sales
+            dev_sales = await self._check_developer_sales(token_address, deployer_address)
+            
+            # Identify snipers and insiders
+            sniper_count = sum(1 for h in holders if await self._is_sniper(h['owner']))
+            insider_count = sum(1 for h in holders if await self._is_insider(h['owner']))
+            
+            # Calculate buy/sell ratio
+            buy_sell_ratio = await self._get_buy_sell_ratio(token_address)
+            
+            # Check large holder concentration
+            large_holders = sum(1 for h in holders 
+                              if (h['amount'] / total_supply) > 0.08 
+                              and h['owner'] != deployer_address)
+            
+            # Determine if token passes all checks
+            is_safe = all([
+                sniper_count <= 2,
+                insider_count <= 2,
+                buy_sell_ratio <= 0.7,
+                large_holders <= 2,
+                not dev_sales['has_sold']
+            ])
+            
+            return {
+                'is_safe': is_safe,
+                'metrics': {
+                    'total_holders': len(holders),
+                    'sniper_count': sniper_count,
+                    'insider_count': insider_count,
+                    'buy_sell_ratio': buy_sell_ratio,
+                    'large_holders': large_holders,
+                    'dev_sales': dev_sales
+                },
+                'failure_reasons': self._get_failure_reasons(
+                    sniper_count, insider_count, buy_sell_ratio, 
+                    large_holders, dev_sales['has_sold']
+                )
+            }
+            
+        except Exception as e:
+            logging.error(f"Error analyzing holders: {e}")
+            return self._get_empty_result()
+            
+    async def _get_token_holders(self, token_address: str) -> List[Dict]:
+        """Get all token holders using Helius API"""
+        payload = {
+            "jsonrpc": "2.0",
+            "id": "my-id",
+            "method": "getTokenLargestAccounts",
+            "params": [token_address]
+        }
+        
+        async with aiohttp.ClientSession() as session:
+            async with session.post(self.api_url, json=payload) as response:
+                if response.status == 200:
+                    data = await response.json()
+                    return data.get('result', {}).get('value', [])
+        return []
+        
+    async def _check_developer_sales(self, token_address: str, deployer_address: str) -> Dict:
+        """Check if developer has sold any tokens"""
+        payload = {
+            "jsonrpc": "2.0",
+            "id": "my-id",
+            "method": "getSignaturesForAddress",
+            "params": [deployer_address, {"limit": 100}]
+        }
+        
+        try:
+            async with aiohttp.ClientSession() as session:
+                async with session.post(self.api_url, json=payload) as response:
+                    if response.status == 200:
+                        data = await response.json()
+                        signatures = [tx['signature'] for tx in data.get('result', [])]
+                        
+                        # Check each transaction for token sales
+                        for sig in signatures:
+                            tx_data = await self._get_transaction(sig)
+                            if self._is_token_sale(tx_data, token_address, deployer_address):
+                                return {'has_sold': True, 'first_sale_signature': sig}
+                                
+        except Exception as e:
+            logging.error(f"Error checking developer sales: {e}")
+            
+        return {'has_sold': False, 'first_sale_signature': None}
+        
+    async def _is_sniper(self, address: str) -> bool:
+        """Check if address is a known sniper"""
+        conn = sqlite3.connect(DB_FILE)
+        try:
+            c = conn.cursor()
+            c.execute("SELECT 1 FROM known_snipers WHERE address = ?", (address,))
+            return bool(c.fetchone())
+        finally:
+            conn.close()
+            
+    async def _is_insider(self, address: str) -> bool:
+        """Check if address is a known insider"""
+        conn = sqlite3.connect(DB_FILE)
+        try:
+            c = conn.cursor()
+            c.execute("SELECT 1 FROM known_insiders WHERE address = ?", (address,))
+            return bool(c.fetchone())
+        finally:
+            conn.close()
+            
+    async def _get_buy_sell_ratio(self, token_address: str) -> float:
+        """Calculate buy/sell ratio for token"""
+        conn = sqlite3.connect(DB_FILE)
+        try:
+            c = conn.cursor()
+            c.execute("""
+                SELECT 
+                    COUNT(CASE WHEN transaction_type = 'buy' THEN 1 END) as buys,
+                    COUNT(CASE WHEN transaction_type = 'sell' THEN 1 END) as sells
+                FROM transactions 
+                WHERE token_address = ?
+            """, (token_address,))
+            
+            buys, sells = c.fetchone()
+            total = buys + sells
+            return buys / total if total > 0 else 0
+            
+        finally:
+            conn.close()
+            
+    def _get_failure_reasons(self, sniper_count: int, insider_count: int, 
+                           buy_sell_ratio: float, large_holders: int, 
+                           dev_has_sold: bool) -> List[str]:
+        """Get list of reasons why token failed checks"""
+        reasons = []
+        if sniper_count > 2:
+            reasons.append("Too many snipers")
+        if insider_count > 2:
+            reasons.append("Too many insiders")
+        if buy_sell_ratio > 0.7:
+            reasons.append("Suspicious buy/sell ratio")
+        if large_holders > 2:
+            reasons.append("Too many large holders")
+        if dev_has_sold:
+            reasons.append("Developer has sold tokens")
+        return reasons
+        
+    def _get_empty_result(self) -> Dict:
+        """Return empty result structure"""
+        return {
+            'is_safe': False,
+            'metrics': {
+                'total_holders': 0,
+                'sniper_count': 0,
+                'insider_count': 0,
+                'buy_sell_ratio': 0,
+                'large_holders': 0,
+                'dev_sales': {'has_sold': False, 'first_sale_signature': None}
+            },
+            'failure_reasons': ["Could not analyze holders"]
+        }
+        
+    async def _get_transaction(self, signature: str) -> Dict:
+        """Get transaction details from Helius"""
+        payload = {
+            "jsonrpc": "2.0",
+            "id": "my-id",
+            "method": "getTransaction",
+            "params": [signature]
+        }
+        
+        async with aiohttp.ClientSession() as session:
+            async with session.post(self.api_url, json=payload) as response:
+                if response.status == 200:
+                    data = await response.json()
+                    return data.get('result', {})
+        return {}
 
 class TokenScorer:
     def __init__(self, db_file: str):
@@ -1153,124 +1349,65 @@ class TokenMonitor:
             logging.error(f"Error sending price alert: {response.text}")
 
 def init_db():
-    """Initialize database schema for token monitoring"""
-    conn = sqlite3.connect(DB_FILE)
-    try:
-        c = conn.cursor()
-        
-        # Create tokens table
-        c.execute('''
-            CREATE TABLE IF NOT EXISTS tokens (
-                address TEXT PRIMARY KEY,
-                name TEXT,
-                symbol TEXT,
-                decimals INTEGER,
-                current_price REAL,
-                current_market_cap REAL,
-                peak_market_cap REAL,
-                last_updated INTEGER
-            )
-        ''')
-        
-        # Create token_market_caps table for historical data
-        c.execute('''
-            CREATE TABLE IF NOT EXISTS token_market_caps (
-                token_address TEXT,
-                market_cap REAL,
-                timestamp INTEGER,
-                PRIMARY KEY (token_address, timestamp)
-            )
-        ''')
-        
-        # Create deployer_stats table
-        c.execute('''
-            CREATE TABLE IF NOT EXISTS deployer_stats (
-                address TEXT PRIMARY KEY,
-                total_tokens INTEGER,
-                tokens_above_3m INTEGER,
-                tokens_above_200k INTEGER,
-                last_token_time INTEGER,
-                is_blacklisted BOOLEAN,
-                last_updated INTEGER,
-                failure_rate REAL
-            )
-        ''')
-        
-        # Create token_scores table
-        c.execute('''
-            CREATE TABLE IF NOT EXISTS token_scores (
-                token_address TEXT PRIMARY KEY,
-                final_score REAL,
-                component_scores TEXT,
-                last_updated INTEGER
-            )
-        ''')
-        
-        conn.commit()
-    finally:
-        conn.close()
-
-def ensure_db_columns():
-    """Ensure required columns exist in the deployers and tokens tables"""
+    """Initialize SQLite database with required tables"""
     conn = sqlite3.connect(DB_FILE)
     c = conn.cursor()
-    try:
-        # Check existing columns in tokens table
-        c.execute("PRAGMA table_info(tokens)")
-        token_columns = [row[1] for row in c.fetchall()]
-
-        # Add Twitter-related columns if they don't exist
-        if "twitter_handle" not in token_columns:
-            c.execute("ALTER TABLE tokens ADD COLUMN twitter_handle TEXT")
-            logging.info("Added column 'twitter_handle' to tokens table")
-
-        if "twitter_name_changes" not in token_columns:
-            c.execute("ALTER TABLE tokens ADD COLUMN twitter_name_changes INTEGER DEFAULT 0")
-            logging.info("Added column 'twitter_name_changes' to tokens table")
-
-        if "twitter_followers" not in token_columns:
-            c.execute("ALTER TABLE tokens ADD COLUMN twitter_followers INTEGER DEFAULT 0")
-            logging.info("Added column 'twitter_followers' to tokens table")
-
-        if "twitter_creation_date" not in token_columns:
-            c.execute("ALTER TABLE tokens ADD COLUMN twitter_creation_date INTEGER")
-            logging.info("Added column 'twitter_creation_date' to tokens table")
-
-        if "twitter_sentiment_score" not in token_columns:
-            c.execute("ALTER TABLE tokens ADD COLUMN twitter_sentiment_score REAL DEFAULT 0")
-            logging.info("Added column 'twitter_sentiment_score' to tokens table")
-
-        if "twitter_engagement_score" not in token_columns:
-            c.execute("ALTER TABLE tokens ADD COLUMN twitter_engagement_score REAL DEFAULT 0")
-            logging.info("Added column 'twitter_engagement_score' to tokens table")
-
-        if "twitter_risk_score" not in token_columns:
-            c.execute("ALTER TABLE tokens ADD COLUMN twitter_risk_score REAL DEFAULT 0")
-            logging.info("Added column 'twitter_risk_score' to tokens table")
-
-        if "twitter_last_updated" not in token_columns:
-            c.execute("ALTER TABLE tokens ADD COLUMN twitter_last_updated INTEGER")
-            logging.info("Added column 'twitter_last_updated' to tokens table")
-
-        # Create twitter_mentions table if it doesn't exist
-        c.execute('''
-            CREATE TABLE IF NOT EXISTS twitter_mentions (
-                token_address TEXT,
-                tweet_id TEXT,
-                author_id TEXT,
-                created_at INTEGER,
-                sentiment_score REAL,
-                is_notable_account INTEGER,
-                PRIMARY KEY (token_address, tweet_id)
-            )
-        ''')
-        logging.info("Ensured twitter_mentions table exists")
-
-        conn.commit()
-    except sqlite3.Error as e:
-        logging.error(f"Database error: {e}")
-    finally:
-        conn.close()
+    
+    # Create tables if they don't exist
+    c.execute("""
+        CREATE TABLE IF NOT EXISTS tokens (
+            address TEXT PRIMARY KEY,
+            deployer_address TEXT,
+            max_market_cap REAL,
+            creation_time INTEGER,
+            twitter_handle TEXT,
+            twitter_name_changes INTEGER DEFAULT 0
+        )
+    """)
+    
+    c.execute("""
+        CREATE TABLE IF NOT EXISTS token_holders (
+            token_address TEXT,
+            holder_address TEXT,
+            balance REAL,
+            last_updated INTEGER,
+            PRIMARY KEY (token_address, holder_address)
+        )
+    """)
+    
+    c.execute("""
+        CREATE TABLE IF NOT EXISTS transactions (
+            signature TEXT PRIMARY KEY,
+            token_address TEXT,
+            transaction_type TEXT,
+            amount REAL,
+            price REAL,
+            timestamp INTEGER,
+            buyer_address TEXT,
+            seller_address TEXT
+        )
+    """)
+    
+    c.execute("""
+        CREATE TABLE IF NOT EXISTS known_snipers (
+            address TEXT PRIMARY KEY,
+            detection_time INTEGER,
+            confidence_score REAL,
+            detection_reason TEXT
+        )
+    """)
+    
+    c.execute("""
+        CREATE TABLE IF NOT EXISTS known_insiders (
+            address TEXT PRIMARY KEY,
+            detection_time INTEGER,
+            confidence_score REAL,
+            detection_reason TEXT
+        )
+    """)
+    
+    conn.commit()
+    conn.close()
 
 def fetch_transaction(signature):
     """Fetch transaction details from Helius API."""
@@ -1652,7 +1789,6 @@ class WebSocketMonitor:
 
 def main():
     init_db()
-    ensure_db_columns()
     
     sample_signature = "4JWQMMs63xBM3dGKUF29YZnyp6LMEJJGCACo6YBiU2toTqiUDPP79i35Ynct8f6ppCtnRGG7FM7DxomzmYCtuy6F"
 
