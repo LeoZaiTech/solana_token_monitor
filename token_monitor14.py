@@ -1414,6 +1414,271 @@ class TokenSafetyChecker:
         # Implement your logic here
         return 1.0
 
+class TokenHeuristics:
+    """Advanced heuristics for detecting suspicious token behavior"""
+    
+    def __init__(self, helius_api_key: str):
+        self.helius_api_key = helius_api_key
+        self.api_url = "https://mainnet.helius-rpc.com/?api-key=" + helius_api_key
+        
+    async def analyze_token_safety(self, token_address: str, deployer_address: str, liquidity_address: str) -> Dict:
+        """
+        Run comprehensive token safety checks:
+        - Top 10 holder concentration
+        - Volume manipulation detection
+        - Supply allocation analysis
+        """
+        try:
+            # Get all holders and their balances
+            holders = await self._get_token_holders(token_address)
+            if not holders:
+                return self._get_empty_result()
+                
+            # Calculate total supply excluding burn addresses
+            total_supply = sum(h['amount'] for h in holders 
+                             if not self._is_burn_address(h['owner']))
+                
+            # Check top 10 holder concentration
+            top_10_concentration = await self._check_holder_concentration(
+                holders, total_supply, deployer_address, liquidity_address)
+                
+            # Check for volume manipulation
+            volume_analysis = await self._analyze_volume(token_address)
+            
+            # Check supply allocation
+            supply_analysis = await self._analyze_supply_allocation(
+                holders, total_supply, deployer_address)
+                
+            # Determine if token passes all checks
+            is_safe = all([
+                not top_10_concentration['is_suspicious'],
+                not volume_analysis['is_suspicious'],
+                not supply_analysis['is_suspicious']
+            ])
+            
+            return {
+                'is_safe': is_safe,
+                'metrics': {
+                    'top_10_concentration': top_10_concentration,
+                    'volume_analysis': volume_analysis,
+                    'supply_analysis': supply_analysis
+                },
+                'failure_reasons': self._get_failure_reasons(
+                    top_10_concentration, volume_analysis, supply_analysis)
+            }
+            
+        except Exception as e:
+            logging.error(f"Error in token heuristics: {e}")
+            return self._get_empty_result()
+            
+    async def _check_holder_concentration(self, holders: List[Dict], 
+                                        total_supply: float,
+                                        deployer_address: str,
+                                        liquidity_address: str) -> Dict:
+        """Check if top 10 non-liquidity holders own >25% of supply"""
+        # Filter out deployer, liquidity, and burn addresses
+        filtered_holders = [
+            h for h in holders 
+            if h['owner'] not in {deployer_address, liquidity_address}
+            and not self._is_burn_address(h['owner'])
+        ]
+        
+        # Sort by balance and get top 10
+        top_10 = sorted(filtered_holders, 
+                       key=lambda x: float(x['amount']), 
+                       reverse=True)[:10]
+                       
+        # Calculate concentration
+        concentration = sum(float(h['amount']) for h in top_10) / total_supply
+        
+        return {
+            'is_suspicious': concentration > 0.25,
+            'concentration': concentration,
+            'details': {
+                'top_10_addresses': [h['owner'] for h in top_10],
+                'individual_percentages': [
+                    float(h['amount']) / total_supply for h in top_10
+                ]
+            }
+        }
+        
+    async def _analyze_volume(self, token_address: str) -> Dict:
+        """Detect suspicious trading volume patterns"""
+        # Get recent trades
+        trades = await self._get_recent_trades(token_address)
+        if not trades:
+            return {'is_suspicious': True, 'reason': 'No trading activity'}
+            
+        # Group trades by time windows (e.g., 5-minute intervals)
+        window_size = 300  # 5 minutes
+        volume_windows = {}
+        
+        for trade in trades:
+            window = trade['timestamp'] // window_size
+            if window not in volume_windows:
+                volume_windows[window] = 0
+            volume_windows[window] += trade['amount'] * trade['price']
+            
+        # Calculate volume metrics
+        if not volume_windows:
+            return {'is_suspicious': True, 'reason': 'No trading activity'}
+            
+        avg_volume = sum(volume_windows.values()) / len(volume_windows)
+        max_volume = max(volume_windows.values())
+        volume_spikes = sum(1 for v in volume_windows.values() if v > avg_volume * 3)
+        
+        return {
+            'is_suspicious': volume_spikes > len(volume_windows) * 0.2,  # >20% spikes
+            'metrics': {
+                'average_volume': avg_volume,
+                'max_volume': max_volume,
+                'volume_spikes': volume_spikes,
+                'total_windows': len(volume_windows)
+            }
+        }
+        
+    async def _analyze_supply_allocation(self, holders: List[Dict], 
+                                       total_supply: float,
+                                       deployer_address: str) -> Dict:
+        """Check for suspicious initial supply allocation"""
+        # Get initial allocation transactions
+        initial_txs = await self._get_initial_transactions(deployer_address)
+        
+        # Check for single-entity control
+        deployer_balance = sum(float(h['amount']) for h in holders 
+                             if h['owner'] == deployer_address)
+        deployer_percentage = deployer_balance / total_supply
+        
+        # Check for suspicious batch transfers
+        batch_transfers = self._analyze_batch_patterns(initial_txs)
+        
+        return {
+            'is_suspicious': deployer_percentage > 0.5 or batch_transfers['is_suspicious'],
+            'metrics': {
+                'deployer_percentage': deployer_percentage,
+                'batch_analysis': batch_transfers
+            }
+        }
+        
+    def _analyze_batch_patterns(self, transactions: List[Dict]) -> Dict:
+        """Analyze patterns in batch transfers for suspicious behavior"""
+        if not transactions:
+            return {'is_suspicious': True, 'reason': 'No initial transactions'}
+            
+        # Group transfers by amount
+        amount_groups = {}
+        for tx in transactions:
+            amount = tx['amount']
+            if amount not in amount_groups:
+                amount_groups[amount] = 0
+            amount_groups[amount] += 1
+            
+        # Check for suspicious patterns
+        max_identical = max(amount_groups.values())
+        total_transfers = len(transactions)
+        
+        return {
+            'is_suspicious': max_identical > total_transfers * 0.4,  # >40% identical
+            'metrics': {
+                'max_identical_transfers': max_identical,
+                'total_transfers': total_transfers,
+                'unique_amounts': len(amount_groups)
+            }
+        }
+        
+    async def _get_token_holders(self, token_address: str) -> List[Dict]:
+        """Get all token holders using Helius API"""
+        payload = {
+            "jsonrpc": "2.0",
+            "id": "my-id",
+            "method": "getTokenLargestAccounts",
+            "params": [token_address]
+        }
+        
+        async with aiohttp.ClientSession() as session:
+            async with session.post(self.api_url, json=payload) as response:
+                if response.status == 200:
+                    data = await response.json()
+                    return data.get('result', {}).get('value', [])
+        return []
+        
+    async def _get_recent_trades(self, token_address: str) -> List[Dict]:
+        """Get recent trades from database"""
+        conn = sqlite3.connect(DB_FILE)
+        try:
+            c = conn.cursor()
+            c.execute("""
+                SELECT amount, price, timestamp
+                FROM transactions
+                WHERE token_address = ?
+                AND timestamp >= ?
+                ORDER BY timestamp DESC
+                LIMIT 1000
+            """, (token_address, int(time.time()) - 86400))  # Last 24 hours
+            
+            return [{
+                'amount': row[0],
+                'price': row[1],
+                'timestamp': row[2]
+            } for row in c.fetchall()]
+        finally:
+            conn.close()
+            
+    async def _get_initial_transactions(self, deployer_address: str) -> List[Dict]:
+        """Get initial token transfer transactions"""
+        conn = sqlite3.connect(DB_FILE)
+        try:
+            c = conn.cursor()
+            c.execute("""
+                SELECT amount
+                FROM transactions
+                WHERE seller_address = ?
+                AND timestamp >= ?
+                ORDER BY timestamp ASC
+                LIMIT 100
+            """, (deployer_address, int(time.time()) - 3600))  # First hour
+            
+            return [{'amount': row[0]} for row in c.fetchall()]
+        finally:
+            conn.close()
+            
+    def _is_burn_address(self, address: str) -> bool:
+        """Check if address is a known burn address"""
+        burn_addresses = {
+            "1111111111111111111111111111111111111111",
+            "burn111111111111111111111111111111111111",
+            "deadbeef111111111111111111111111111111"
+        }
+        return address in burn_addresses
+            
+    def _get_failure_reasons(self, concentration: Dict, 
+                           volume: Dict, 
+                           supply: Dict) -> List[str]:
+        """Get list of reasons why token failed checks"""
+        reasons = []
+        if concentration['is_suspicious']:
+            reasons.append(f"High holder concentration: {concentration['concentration']*100:.1f}%")
+        if volume['is_suspicious']:
+            reasons.append("Suspicious trading volume patterns")
+        if supply['is_suspicious']:
+            if supply['metrics']['deployer_percentage'] > 0.5:
+                reasons.append("High deployer token control")
+            if supply['metrics']['batch_analysis']['is_suspicious']:
+                reasons.append("Suspicious batch transfer patterns")
+        return reasons
+        
+    def _get_empty_result(self) -> Dict:
+        """Return empty result structure"""
+        return {
+            'is_safe': False,
+            'metrics': {
+                'top_10_concentration': {'is_suspicious': True, 'concentration': 0},
+                'volume_analysis': {'is_suspicious': True, 'reason': 'No data'},
+                'supply_analysis': {'is_suspicious': True, 'reason': 'No data'}
+            },
+            'failure_reasons': ["Could not analyze token"]
+        }
+
 class PriceAlert:
     def __init__(self, token_address: str, target_price: float, is_above: bool = True):
         self.token_address = token_address
