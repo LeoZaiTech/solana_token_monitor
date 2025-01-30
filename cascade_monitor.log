@@ -1,0 +1,3 @@
+2025-01-29 23:53:58,553 - INFO - Starting Cascade Token Monitor...
+2025-01-29 23:53:58,553 - ERROR - Error in monitoring loop: 'TokenMonitorCascade' object has no attribute 'update_existing_tokens'
+2025-01-29 23:53:58,885 - INFO - Subscribed to pump.fun program: 6EF8rrecthR5Dkzon8Nwu78hRvfCKubJ14M5uBEwF6P
