@@ -1,28 +1,22 @@
 import os
+import sqlite3
 import json
+import requests
+import time
 import logging
-import tweepy
-from datetime import datetime, timedelta
-from typing import Dict, List, Optional, Tuple
-from dataclasses import dataclass
-from textblob import TextBlob
+from datetime import datetime
 from dotenv import load_dotenv
+from discord_webhook import DiscordWebhook
+import asyncio
+from dataclasses import dataclass
+from typing import Dict, List, Optional, Tuple
+import aiohttp
+from collections import defaultdict, Counter
 
 # Load environment variables
 load_dotenv()
-TWITTER_API_KEY = os.getenv("TWITTER_API_KEY")
-TWITTER_API_SECRET = os.getenv("TWITTER_API_SECRET")
-TWITTER_ACCESS_TOKEN = os.getenv("TWITTER_ACCESS_TOKEN")
-TWITTER_ACCESS_SECRET = os.getenv("TWITTER_ACCESS_SECRET")
-TWITTER_BEARER_TOKEN = os.getenv("TWITTER_BEARER_TOKEN")
-
-import sqlite3
-import requests
-import time
-from discord_webhook import DiscordWebhook
-import asyncio
-import aiohttp
-from collections import defaultdict, Counter
+HELIUS_API_KEY = os.getenv("HELIUS_API_KEY")
+DISCORD_WEBHOOK_URL = os.getenv("DISCORD_WEBHOOK_URL")
 
 # SQLite database initialization
 DB_FILE = "solana_transactions.db"
@@ -999,221 +993,24 @@ class TokenSafetyChecker:
         # Implement your logic here
         return 1.0
 
-class TwitterAnalyzer:
-    """Twitter analysis for token monitoring"""
-    
-    def __init__(self):
-        """Initialize Twitter API client"""
-        try:
-            auth = tweepy.OAuthHandler(TWITTER_API_KEY, TWITTER_API_SECRET)
-            auth.set_access_token(TWITTER_ACCESS_TOKEN, TWITTER_ACCESS_SECRET)
-            self.api = tweepy.API(auth, wait_on_rate_limit=True)
-            self.client = self.api
-            self.notable_accounts = self._load_notable_accounts()
-        except Exception as e:
-            logging.error(f"Twitter API initialization error: {e}")
-            raise
-
-    def _load_notable_accounts(self) -> Dict[str, Dict]:
-        """Load list of notable crypto Twitter accounts"""
-        try:
-            with open('notable_accounts.json', 'r') as f:
-                return json.load(f)
-        except FileNotFoundError:
-            # Create default notable accounts if file doesn't exist
-            default_accounts = {
-                "solana": {"username": "solana", "weight": 10},
-                "aeyakovenko": {"username": "aeyakovenko", "weight": 9},
-                "raj_gokal": {"username": "raj_gokal", "weight": 9},
-                # Add more default notable accounts
-            }
-            with open('notable_accounts.json', 'w') as f:
-                json.dump(default_accounts, f, indent=2)
-            return default_accounts
-
-    async def analyze_token(self, contract_address: str) -> Dict:
-        """Comprehensive Twitter analysis for a token"""
-        try:
-            # Initialize metrics
-            metrics = {
-                'contract_address': contract_address,
-                'mention_count': 0,
-                'notable_mentions': [],
-                'name_changes': [],
-                'sentiment_score': 0.0,
-                'verified_mentions': 0,
-                'recent_tweets': [],
-                'official_account': None
-            }
-            
-            # Search for contract address mentions
-            tweets = self._search_contract_mentions(contract_address)
-            metrics['mention_count'] = len(tweets) if tweets else 0
-            
-            # Analyze tweets
-            sentiment_scores = []
-            if tweets:
-                for tweet in tweets:
-                    # Get user data
-                    user = self.client.get_user(id=tweet.author_id)
-                    if user and user.data:
-                        # Track verified mentions
-                        if user.data.verified:
-                            metrics['verified_mentions'] += 1
-                        
-                        # Check for notable mentions
-                        if self._is_notable_account(user.data.username):
-                            metrics['notable_mentions'].append({
-                                'username': user.data.username,
-                                'text': tweet.text,
-                                'timestamp': tweet.created_at.isoformat() if tweet.created_at else None
-                            })
-                    
-                    # Calculate sentiment
-                    sentiment = TextBlob(tweet.text).sentiment.polarity
-                    sentiment_scores.append(sentiment)
-                    
-                    # Store recent tweet
-                    metrics['recent_tweets'].append({
-                        'id': tweet.id,
-                        'text': tweet.text,
-                        'author': user.data.username if user and user.data else 'unknown',
-                        'created_at': tweet.created_at.isoformat() if tweet.created_at else None,
-                        'verified': user.data.verified if user and user.data else False
-                    })
-            
-            # Calculate average sentiment
-            metrics['sentiment_score'] = sum(sentiment_scores) / len(sentiment_scores) if sentiment_scores else 0
-            
-            # Find official account and track name changes
-            official_account = await self._find_official_account(contract_address)
-            if official_account:
-                metrics['official_account'] = official_account['username']
-                metrics['name_changes'] = await self._track_name_changes(official_account['id'])
-            
-            return metrics
-            
-        except Exception as e:
-            logging.error(f"Error analyzing token {contract_address} on Twitter: {e}")
-            raise
-
-    def _search_contract_mentions(self, contract_address: str) -> List:
-        """Search for tweets mentioning the contract address"""
-        try:
-            # Search for exact contract address
-            query = f'"{contract_address}"'
-            tweets = self.api.search_tweets(
-                q=query,
-                count=100,
-                tweet_mode='extended'
-            )
-            return tweets if tweets else []
-        except Exception as e:
-            logging.error(f"Error searching Twitter for {contract_address}: {e}")
-            return []
-
-    def _is_notable_account(self, username: str) -> bool:
-        """Check if account is in our notable accounts list"""
-        return username.lower() in self.notable_accounts
-
-    async def _find_official_account(self, contract_address: str) -> Optional[Dict]:
-        """Find official Twitter account for token"""
-        try:
-            # Search for accounts that might be official
-            query = f'"{contract_address}" is:verified'
-            response = self.api.search_tweets(
-                q=query,
-                count=10,
-                tweet_mode='extended'
-            )
-            
-            if not response or not response.data:
-                return None
-                
-            # Get the first verified account that mentions the contract
-            for tweet in response.data:
-                user = self.client.get_user(id=tweet.author_id)
-                if user and user.data and user.data.verified:
-                    return {
-                        'id': tweet.author_id,
-                        'username': user.data.username
-                    }
-            
-            return None
-            
-        except Exception as e:
-            logging.error(f"Error finding official account for {contract_address}: {e}")
-            return None
-
-    async def _track_name_changes(self, account_id: str) -> List[Dict[str, str]]:
-        """Track account name changes over time"""
-        try:
-            response = self.api.get_users_tweets(
-                id=account_id,
-                max_results=100,
-                tweet_fields=['created_at'],
-                user_fields=['username']
-            )
-            
-            if not response or not response.data:
-                return []
-            
-            # Look for username changes in tweet metadata
-            name_changes = []
-            current_name = None
-            
-            for tweet in response.data:
-                user = self.client.get_user(id=tweet.author_id)
-                if user and user.data and user.data.username != current_name:
-                    name_changes.append({
-                        'timestamp': tweet.created_at.isoformat() if tweet.created_at else None,
-                        'name': user.data.username
-                    })
-                    current_name = user.data.username
-            
-            return name_changes
-            
-        except Exception as e:
-            logging.error(f"Error tracking name changes for account {account_id}: {e}")
-            return []
-
-    def calculate_risk_score(self, metrics: Dict) -> float:
-        """Calculate risk score based on Twitter metrics"""
-        risk_score = 0.0
-        
-        # Name changes increase risk
-        risk_score += len(metrics['name_changes']) * 0.1
-        
-        # Negative sentiment increases risk
-        if metrics['sentiment_score'] < 0:
-            risk_score += abs(metrics['sentiment_score']) * 0.3
-        
-        # Notable mentions decrease risk
-        risk_score -= len(metrics['notable_mentions']) * 0.15
-        
-        # Verified mentions decrease risk
-        risk_score -= metrics['verified_mentions'] * 0.05
-        
-        # Normalize score between 0 and 1
-        risk_score = max(0.0, min(1.0, risk_score))
-        
-        return risk_score
+class PriceAlert:
+    def __init__(self, token_address: str, target_price: float, is_above: bool = True):
+        self.token_address = token_address
+        self.target_price = target_price
+        self.is_above = is_above  # True for price above target, False for below
+        self.triggered = False
 
 class TokenMonitor:
     def __init__(self, db_file: str):
         self.db_file = db_file
-        self.price_alerts: Dict[str, List] = {}
+        self.price_alerts: Dict[str, List[PriceAlert]] = {}
         self.init_db()
     
     def add_price_alert(self, token_address: str, target_price: float, is_above: bool = True):
         """Add a price alert for a token"""
         if token_address not in self.price_alerts:
             self.price_alerts[token_address] = []
-        alert = {
-            'target_price': target_price,
-            'is_above': is_above,
-            'triggered': False
-        }
+        alert = PriceAlert(token_address, target_price, is_above)
         self.price_alerts[token_address].append(alert)
         logging.info(f"Added price alert for {token_address}: {'above' if is_above else 'below'} {target_price}")
     
@@ -1223,18 +1020,18 @@ class TokenMonitor:
             return
             
         for alert in self.price_alerts[token_address]:
-            if alert['triggered']:
+            if alert.triggered:
                 continue
                 
             triggered = False
-            if alert['is_above'] and current_price > alert['target_price']:
+            if alert.is_above and current_price > alert.target_price:
                 triggered = True
-            elif not alert['is_above'] and current_price < alert['target_price']:
+            elif not alert.is_above and current_price < alert.target_price:
                 triggered = True
                 
             if triggered:
-                alert['triggered'] = True
-                await self.send_price_alert(token_address, current_price, alert['target_price'], alert['is_above'])
+                alert.triggered = True
+                await self.send_price_alert(token_address, current_price, alert.target_price, alert.is_above)
     
     async def send_price_alert(self, token_address: str, current_price: float, target_price: float, was_above: bool):
         """Send price alert notification"""

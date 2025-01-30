@@ -1,0 +1,22 @@
+{
+    "solana": {"username": "solana", "weight": 10},
+    "aeyakovenko": {"username": "aeyakovenko", "weight": 9},
+    "raj_gokal": {"username": "raj_gokal", "weight": 9},
+    "SBF_FTX": {"username": "SBF_FTX", "weight": 8},
+    "DefiLlama": {"username": "DefiLlama", "weight": 8},
+    "solanafloor": {"username": "solanafloor", "weight": 7},
+    "solanart_io": {"username": "solanart_io", "weight": 7},
+    "magiceden": {"username": "magiceden", "weight": 8},
+    "phantom": {"username": "phantom", "weight": 8},
+    "solendprotocol": {"username": "solendprotocol", "weight": 7},
+    "raydium_io": {"username": "raydium_io", "weight": 8},
+    "orca_so": {"username": "orca_so", "weight": 8},
+    "serum_dex": {"username": "serum_dex", "weight": 8},
+    "mango_markets": {"username": "mango_markets", "weight": 7},
+    "solape_io": {"username": "solape_io", "weight": 6},
+    "stepfinance_": {"username": "stepfinance_", "weight": 6},
+    "SolanaNews": {"username": "SolanaNews", "weight": 6},
+    "SolanaStatus": {"username": "SolanaStatus", "weight": 7},
+    "solanafamily": {"username": "solanafamily", "weight": 6},
+    "solanians": {"username": "solanians", "weight": 6}
+}
