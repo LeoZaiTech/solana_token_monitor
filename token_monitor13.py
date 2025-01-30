@@ -486,40 +486,52 @@ class TokenScorer:
         self.db_file = db_file
         self.deployer_analyzer = DeployerAnalyzer(db_file)
         self.holder_analyzer = HolderAnalyzer(db_file)
+        self.twitter_analyzer = TwitterAnalyzer()  # Add Twitter analyzer
 
     async def calculate_token_score(self, token_address: str, tx_data: tuple) -> float:
-        """
-        Calculate a comprehensive confidence score for a token.
-        Returns a score between 0-100, where higher is better.
-        """
+        """Calculate a comprehensive confidence score for a token."""
         try:
             scores = {
-                'deployer_score': await self._get_deployer_score(tx_data[8]),  # 30%
-                'holder_score': self._get_holder_score(tx_data),               # 25%
-                'transaction_score': self._get_transaction_score(tx_data),     # 20%
-                'sniper_score': self._get_sniper_score(tx_data),              # 15%
-                'market_cap_score': await self._get_market_cap_score(token_address)  # 10%
+                'deployer_score': await self._get_deployer_score(tx_data[8]),  # 25%
+                'holder_score': self._get_holder_score(tx_data),  # 20%
+                'transaction_score': self._get_transaction_score(tx_data),  # 20%
+                'sniper_score': self._get_sniper_score(tx_data),  # 15%
+                'market_cap_score': await self._get_market_cap_score(token_address),  # 10%
+                'twitter_score': await self._get_twitter_score(token_address)  # 10%
             }
 
-            # Weight multipliers
             weights = {
-                'deployer_score': 0.30,
-                'holder_score': 0.25,
+                'deployer_score': 0.25,
+                'holder_score': 0.20,
                 'transaction_score': 0.20,
                 'sniper_score': 0.15,
-                'market_cap_score': 0.10
+                'market_cap_score': 0.10,
+                'twitter_score': 0.10
             }
 
-            # Calculate weighted score
             final_score = sum(scores[key] * weights[key] for key in scores)
-
-            # Store the score in the database
             await self._save_score(token_address, final_score, scores)
-
-            return float(final_score)  # Ensure we return a float
+            return float(final_score)
         except Exception as e:
             logging.error(f"Error in calculate_token_score: {str(e)}")
-            raise
+            return 0.0
+
+    async def _get_twitter_score(self, token_address: str) -> float:
+        """Calculate score based on Twitter metrics."""
+        try:
+            twitter_metrics = await self.twitter_analyzer.analyze_token(token_address)
+            if not twitter_metrics:
+                return 50.0  # Neutral score if no Twitter data
+
+            risk_score = self.twitter_analyzer.calculate_risk_score(twitter_metrics)
+            
+            # Convert risk score (0-1 where 1 is high risk) to confidence score (0-100 where 100 is good)
+            twitter_score = (1 - risk_score) * 100
+            
+            return float(twitter_score)
+        except Exception as e:
+            logging.error(f"Error in _get_twitter_score: {str(e)}")
+            return 50.0  # Neutral score on error
 
     async def _get_deployer_score(self, deployer_address: str) -> float:
         """Calculate score based on deployer's history"""
@@ -1112,6 +1124,68 @@ def init_db():
     finally:
         conn.close()
 
+def ensure_db_columns():
+    """Ensure required columns exist in the deployers and tokens tables"""
+    conn = sqlite3.connect(DB_FILE)
+    c = conn.cursor()
+    try:
+        # Check existing columns in tokens table
+        c.execute("PRAGMA table_info(tokens)")
+        token_columns = [row[1] for row in c.fetchall()]
+
+        # Add Twitter-related columns if they don't exist
+        if "twitter_handle" not in token_columns:
+            c.execute("ALTER TABLE tokens ADD COLUMN twitter_handle TEXT")
+            logging.info("Added column 'twitter_handle' to tokens table")
+
+        if "twitter_name_changes" not in token_columns:
+            c.execute("ALTER TABLE tokens ADD COLUMN twitter_name_changes INTEGER DEFAULT 0")
+            logging.info("Added column 'twitter_name_changes' to tokens table")
+
+        if "twitter_followers" not in token_columns:
+            c.execute("ALTER TABLE tokens ADD COLUMN twitter_followers INTEGER DEFAULT 0")
+            logging.info("Added column 'twitter_followers' to tokens table")
+
+        if "twitter_creation_date" not in token_columns:
+            c.execute("ALTER TABLE tokens ADD COLUMN twitter_creation_date INTEGER")
+            logging.info("Added column 'twitter_creation_date' to tokens table")
+
+        if "twitter_sentiment_score" not in token_columns:
+            c.execute("ALTER TABLE tokens ADD COLUMN twitter_sentiment_score REAL DEFAULT 0")
+            logging.info("Added column 'twitter_sentiment_score' to tokens table")
+
+        if "twitter_engagement_score" not in token_columns:
+            c.execute("ALTER TABLE tokens ADD COLUMN twitter_engagement_score REAL DEFAULT 0")
+            logging.info("Added column 'twitter_engagement_score' to tokens table")
+
+        if "twitter_risk_score" not in token_columns:
+            c.execute("ALTER TABLE tokens ADD COLUMN twitter_risk_score REAL DEFAULT 0")
+            logging.info("Added column 'twitter_risk_score' to tokens table")
+
+        if "twitter_last_updated" not in token_columns:
+            c.execute("ALTER TABLE tokens ADD COLUMN twitter_last_updated INTEGER")
+            logging.info("Added column 'twitter_last_updated' to tokens table")
+
+        # Create twitter_mentions table if it doesn't exist
+        c.execute('''
+            CREATE TABLE IF NOT EXISTS twitter_mentions (
+                token_address TEXT,
+                tweet_id TEXT,
+                author_id TEXT,
+                created_at INTEGER,
+                sentiment_score REAL,
+                is_notable_account INTEGER,
+                PRIMARY KEY (token_address, tweet_id)
+            )
+        ''')
+        logging.info("Ensured twitter_mentions table exists")
+
+        conn.commit()
+    except sqlite3.Error as e:
+        logging.error(f"Database error: {e}")
+    finally:
+        conn.close()
+
 def fetch_transaction(signature):
     """Fetch transaction details from Helius API."""
     url = f"https://mainnet.helius-rpc.com/?api-key={HELIUS_API_KEY}"
@@ -1516,37 +1590,6 @@ def main():
         asyncio.run(analyze_deployer_history(deployer_address))
     except Exception as e:
         logging.error(f"Error running additional analyses: {e}")
-
-def ensure_db_columns():
-    """Ensure required columns exist in the deployers and tokens tables"""
-    conn = sqlite3.connect(DB_FILE)
-    c = conn.cursor()
-    try:
-        # Check deployers table columns
-        c.execute("PRAGMA table_info(deployers)")
-        deployer_columns = [row[1] for row in c.fetchall()]
-        
-        if "last_token_time" not in deployer_columns:
-            c.execute("ALTER TABLE deployers ADD COLUMN last_token_time INTEGER DEFAULT 0")
-            logging.info("Added column 'last_token_time' to deployers table.")
-        
-        if "failure_rate" not in deployer_columns:
-            c.execute("ALTER TABLE deployers ADD COLUMN failure_rate REAL DEFAULT 0")
-            logging.info("Added column 'failure_rate' to deployers table.")
-
-        # Check tokens table columns
-        c.execute("PRAGMA table_info(tokens)")
-        token_columns = [row[1] for row in c.fetchall()]
-        
-        if "score_components" not in token_columns:
-            c.execute("ALTER TABLE tokens ADD COLUMN score_components TEXT")
-            logging.info("Added column 'score_components' to tokens table.")
-        
-        conn.commit()
-    except sqlite3.Error as e:
-        logging.error(f"Error updating database schema: {e}")
-    finally:
-        conn.close()
 
 if __name__ == "__main__":
     main()
