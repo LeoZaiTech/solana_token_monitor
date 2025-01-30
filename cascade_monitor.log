@@ -1,3 +1,15 @@
 2025-01-29 23:53:58,553 - INFO - Starting Cascade Token Monitor...
 2025-01-29 23:53:58,553 - ERROR - Error in monitoring loop: 'TokenMonitorCascade' object has no attribute 'update_existing_tokens'
 2025-01-29 23:53:58,885 - INFO - Subscribed to pump.fun program: 6EF8rrecthR5Dkzon8Nwu78hRvfCKubJ14M5uBEwF6P
+2025-01-30 00:00:30,838 - INFO - Starting Cascade Token Monitor...
+2025-01-30 00:00:30,838 - ERROR - Error in monitoring loop: 'TokenMonitorCascade' object has no attribute 'update_existing_tokens'
+2025-01-30 00:00:31,636 - INFO - Subscribed to pump.fun program: 6EF8rrecthR5Dkzon8Nwu78hRvfCKubJ14M5uBEwF6P
+2025-01-30 00:01:30,840 - ERROR - Error in monitoring loop: 'TokenMonitorCascade' object has no attribute 'update_existing_tokens'
+2025-01-30 00:01:43,706 - INFO - Starting Cascade Token Monitor...
+2025-01-30 00:01:43,706 - ERROR - Error in monitoring loop: 'TokenMonitorCascade' object has no attribute 'update_existing_tokens'
+2025-01-30 00:01:44,176 - INFO - Subscribed to pump.fun program: 6EF8rrecthR5Dkzon8Nwu78hRvfCKubJ14M5uBEwF6P
+2025-01-30 00:02:43,708 - ERROR - Error in monitoring loop: 'TokenMonitorCascade' object has no attribute 'update_existing_tokens'
+2025-01-30 00:03:43,711 - ERROR - Error in monitoring loop: 'TokenMonitorCascade' object has no attribute 'update_existing_tokens'
+2025-01-30 00:04:43,716 - ERROR - Error in monitoring loop: 'TokenMonitorCascade' object has no attribute 'update_existing_tokens'
+2025-01-30 00:14:16,055 - INFO - Starting Cascade Token Monitor...
+2025-01-30 00:14:16,385 - INFO - Subscribed to pump.fun program: 6EF8rrecthR5Dkzon8Nwu78hRvfCKubJ14M5uBEwF6P

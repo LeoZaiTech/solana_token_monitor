@@ -110,7 +110,7 @@ class TokenMonitorCascade:
         logging.info("Starting Cascade Token Monitor...")
         
         # Start WebSocket subscription (v10)
-        asyncio.create_task(self.subscribe_to_program())
+        ws_task = asyncio.create_task(self.subscribe_to_program())
         
         # Start periodic checks (v8)
         while True:
@@ -277,6 +277,51 @@ class TokenMonitorCascade:
                 logging.error(f"Error sending notification: {response.text}")
         except Exception as e:
             logging.error(f"Error sending notification: {e}")
+
+    async def update_existing_tokens(self):
+        """Update existing tokens in database"""
+        try:
+            conn = sqlite3.connect(self.db_file)
+            c = conn.cursor()
+            
+            # Get tokens that need updating (not updated in last 5 minutes)
+            c.execute('''
+                SELECT address 
+                FROM tokens 
+                WHERE last_updated < ? 
+                OR last_updated IS NULL
+            ''', (int(time.time()) - 300,))
+            
+            tokens = c.fetchall()
+            conn.close()
+            
+            for (token_address,) in tokens:
+                try:
+                    # Get current market cap
+                    market_cap = await self.get_market_cap(token_address)
+                    
+                    if market_cap >= 30000:  # Only analyze if above 30k
+                        metrics = await self.analyze_token(token_address)
+                        if metrics:
+                            await self.check_price_alerts(token_address, market_cap)
+                    
+                    # Update last checked time
+                    conn = sqlite3.connect(self.db_file)
+                    c = conn.cursor()
+                    c.execute('''
+                        UPDATE tokens 
+                        SET last_updated = ? 
+                        WHERE address = ?
+                    ''', (int(time.time()), token_address))
+                    conn.commit()
+                    conn.close()
+                    
+                except Exception as e:
+                    logging.error(f"Error updating token {token_address}: {e}")
+                    continue
+                    
+        except Exception as e:
+            logging.error(f"Error in update_existing_tokens: {e}")
 
 async def main():
     """Main entry point"""
