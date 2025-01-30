@@ -72,7 +72,11 @@ class TokenMonitorCascade:
                 market_cap REAL DEFAULT 0,
                 peak_market_cap REAL DEFAULT 0,
                 total_holders INTEGER DEFAULT 0,
-                last_updated INTEGER
+                last_updated INTEGER,
+                name TEXT,
+                symbol TEXT,
+                decimals INTEGER,
+                total_supply REAL
             )
         ''')
         
@@ -127,6 +131,7 @@ class TokenMonitorCascade:
         while True:
             try:
                 async with websockets.connect(self.ws_url) as websocket:
+                    # First subscribe without filters to see all program transactions
                     subscribe_msg = {
                         "jsonrpc": "2.0",
                         "id": 1,
@@ -135,15 +140,7 @@ class TokenMonitorCascade:
                             PUMP_FUN_PROGRAM_ID,
                             {
                                 "encoding": "jsonParsed",
-                                "commitment": "confirmed",
-                                "filters": [
-                                    {
-                                        "memcmp": {
-                                            "offset": 0,
-                                            "bytes": CREATE_INSTRUCTION_DISCRIMINATOR
-                                        }
-                                    }
-                                ]
+                                "commitment": "confirmed"
                             }
                         ]
                     }
@@ -156,27 +153,72 @@ class TokenMonitorCascade:
                     response = await websocket.recv()
                     logging.debug(f"Subscription response: {response}")
                     
+                    # Start heartbeat task
+                    last_msg_time = time.time()
+                    
                     while True:
                         try:
-                            response = await websocket.recv()
-                            logging.debug(f"Received WebSocket message: {response[:200]}...")  # First 200 chars
+                            response = await asyncio.wait_for(websocket.recv(), timeout=30)
+                            last_msg_time = time.time()
+                            
+                            logging.debug(f"Received WebSocket message: {response[:200]}...")
+                            
+                            # Log heartbeat every 30 seconds if no transactions
+                            if time.time() - last_msg_time > 30:
+                                logging.info("Connection alive - No new transactions in last 30s")
                             
                             data = json.loads(response)
+                            
+                            # Log all message types we receive
                             if "method" in data:
                                 logging.debug(f"Message method: {data['method']}")
                             
-                            if "params" in data and "result" in data["params"]:
-                                tx = data["params"]["result"]["value"]
-                                logging.debug(f"Processing transaction: {json.dumps(tx['transaction']['message']['accountKeys'][:3], indent=2)}")
-                                
-                                if self.is_token_creation(tx):
-                                    logging.info("Found token creation transaction!")
-                                    await self.handle_new_token(tx)
-                                else:
-                                    logging.debug("Transaction is not a token creation")
+                            if "params" in data:
+                                if "result" in data["params"]:
+                                    notification = data["params"]["result"]["value"]
+                                    logging.info(f"Received account notification for: {notification['pubkey']}")
                                     
+                                    # Log full account data for debugging
+                                    logging.debug(f"Account data: {json.dumps(notification['account'], indent=2)}")
+                                    
+                                    try:
+                                        # Process the account update
+                                        if "data" in notification["account"]:
+                                            data_str = notification["account"]["data"]
+                                            if isinstance(data_str, list):
+                                                # Base58 encoded data
+                                                data_str = data_str[0]
+                                            
+                                            # Check if this is a token creation
+                                            if CREATE_INSTRUCTION_DISCRIMINATOR in data_str:
+                                                logging.info(f"Found potential token creation in account: {notification['pubkey']}")
+                                                await self.handle_new_token({
+                                                    "address": notification["pubkey"],
+                                                    "lamports": notification["account"]["lamports"],
+                                                    "data": data_str
+                                                })
+                                    except Exception as e:
+                                        logging.error(f"Error processing account data: {e}")
+                                        continue
+                                else:
+                                    logging.debug(f"Received non-result notification: {response[:200]}")
+                                    
+                        except asyncio.TimeoutError:
+                            logging.warning("No messages received in 30s, checking connection...")
+                            # Send ping to check connection
+                            try:
+                                pong_waiter = await websocket.ping()
+                                await asyncio.wait_for(pong_waiter, timeout=10)
+                                logging.debug("Ping successful - connection alive")
+                            except:
+                                logging.error("Ping failed - reconnecting...")
+                                break
                         except json.JSONDecodeError as e:
                             logging.error(f"Error decoding WebSocket message: {e}")
+                            logging.debug(f"Problematic message: {response[:200]}...")
+                            continue
+                        except Exception as e:
+                            logging.error(f"Error processing message: {e}")
                             logging.debug(f"Problematic message: {response[:200]}...")
                             continue
                             
@@ -185,66 +227,90 @@ class TokenMonitorCascade:
                 logging.info("Attempting to reconnect in 5 seconds...")
                 await asyncio.sleep(5)
 
-    def is_token_creation(self, tx: Dict) -> bool:
-        """Check if transaction is a token creation (from v10)"""
+    async def handle_new_token(self, token_data: Dict):
+        """Process new token creation with enhanced validation"""
         try:
-            logging.debug("Checking if transaction is token creation...")
+            token_address = token_data["address"]
+            logging.info(f"Processing potential new token: {token_address}")
             
-            # Check program ID
-            account_keys = tx["transaction"]["message"]["accountKeys"]
-            logging.debug(f"Account keys in transaction: {json.dumps(account_keys[:3], indent=2)}")
-            
-            program_found = False
-            for account in account_keys:
-                if account["pubkey"] == PUMP_FUN_PROGRAM_ID:
-                    program_found = True
-                    logging.debug("Found pump.fun program ID in transaction")
-                    break
-            
-            if not program_found:
-                logging.debug("pump.fun program ID not found in transaction")
-                return False
-            
-            # Check instruction data
-            if "meta" in tx and "innerInstructions" in tx["meta"]:
-                for ix in tx["meta"]["innerInstructions"]:
-                    if "instructions" in ix:
-                        for instruction in ix["instructions"]:
-                            if "data" in instruction:
-                                logging.debug(f"Checking instruction data: {instruction['data'][:50]}...")
-                                if CREATE_INSTRUCTION_DISCRIMINATOR in instruction["data"]:
-                                    logging.info("Found create instruction discriminator!")
-                                    return True
-            
-            logging.debug("No create instruction found in transaction")
-            return False
-            
-        except Exception as e:
-            logging.error(f"Error checking token creation: {e}")
-            return False
-
-    async def handle_new_token(self, tx: Dict):
-        """Process new token creation (combining v7 and v8)"""
-        try:
-            token_address = tx["transaction"]["message"]["accountKeys"][1]
-            deployer_address = tx["transaction"]["message"]["accountKeys"][0]
-            
-            # Save to database
-            conn = sqlite3.connect(self.db_file)
-            c = conn.cursor()
-            
-            c.execute('''
-                INSERT OR IGNORE INTO tokens 
-                (address, deployer_address, creation_time, last_updated) 
-                VALUES (?, ?, ?, ?)
-            ''', (token_address, deployer_address, int(time.time()), int(time.time())))
-            
-            conn.commit()
-            conn.close()
-            
-            # Start monitoring this token
-            asyncio.create_task(self.monitor_token(token_address))
-            logging.info(f"Started monitoring new token: {token_address}")
+            # Validate token using Helius API
+            async with aiohttp.ClientSession() as session:
+                url = f"https://api.helius.xyz/v0/token-metadata?api-key={HELIUS_API_KEY}"
+                async with session.post(url, json={"mintAccounts": [token_address]}) as response:
+                    if response.status != 200:
+                        logging.error(f"Error validating token: {await response.text()}")
+                        return
+                        
+                    data = await response.json()
+                    if not data or not isinstance(data, list) or not data[0]:
+                        logging.warning(f"Invalid token data for {token_address}")
+                        return
+                    
+                    token_info = data[0]
+                    
+                    # Extract token metadata
+                    token_name = token_info.get("onChainMetadata", {}).get("metadata", {}).get("data", {}).get("name", "Unknown")
+                    token_symbol = token_info.get("onChainMetadata", {}).get("metadata", {}).get("data", {}).get("symbol", "")
+                    decimals = token_info.get("mint", {}).get("decimals", 0)
+                    supply = token_info.get("mint", {}).get("supply", "0")
+                    
+                    # Get deployer information
+                    deployer = token_info.get("mint", {}).get("freezeAuthority", "")
+                    if not deployer:
+                        deployer = token_info.get("mint", {}).get("mintAuthority", "")
+                    
+                    # Save to database with enhanced information
+                    conn = sqlite3.connect(self.db_file)
+                    c = conn.cursor()
+                    
+                    # First check if token already exists
+                    c.execute('SELECT address FROM tokens WHERE address = ?', (token_address,))
+                    if c.fetchone() is None:
+                        c.execute('''
+                            INSERT INTO tokens 
+                            (address, deployer_address, creation_time, last_updated, name, symbol, decimals, total_supply) 
+                            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                        ''', (
+                            token_address,
+                            deployer,
+                            int(time.time()),
+                            int(time.time()),
+                            token_name,
+                            token_symbol,
+                            decimals,
+                            supply
+                        ))
+                        
+                        # Update deployer stats
+                        if deployer:
+                            c.execute('''
+                                INSERT OR REPLACE INTO deployer_stats 
+                                (address, total_tokens, last_token_time) 
+                                VALUES (
+                                    ?,
+                                    COALESCE((SELECT total_tokens + 1 FROM deployer_stats WHERE address = ?), 1),
+                                    ?
+                                )
+                            ''', (deployer, deployer, int(time.time())))
+                        
+                        conn.commit()
+                        
+                        # Send notification for new token
+                        await self.send_notification(
+                            f"🆕 New Token Detected!\n" +
+                            f"Name: {token_name}\n" +
+                            f"Symbol: {token_symbol}\n" +
+                            f"Address: {token_address}\n" +
+                            f"Deployer: {deployer}\n" +
+                            f"Supply: {float(supply):,.0f}"
+                        )
+                        
+                        logging.info(f"Started monitoring new token: {token_name} ({token_address})")
+                        
+                        # Start monitoring this token
+                        asyncio.create_task(self.monitor_token(token_address))
+                    
+                    conn.close()
             
         except Exception as e:
             logging.error(f"Error handling new token: {e}")
@@ -268,14 +334,123 @@ class TokenMonitorCascade:
                 await asyncio.sleep(60)
 
     async def get_market_cap(self, token_address: str) -> float:
-        """Calculate token market cap"""
-        # TODO: Implement proper market cap calculation using bonding curve
-        return 0.0
+        """Calculate token market cap using bonding curve and current liquidity"""
+        try:
+            # Fetch token data from Helius API
+            async with aiohttp.ClientSession() as session:
+                url = f"https://api.helius.xyz/v0/tokens?api-key={HELIUS_API_KEY}"
+                async with session.post(url, json={"mints": [token_address]}) as response:
+                    if response.status != 200:
+                        logging.error(f"Error fetching token data: {await response.text()}")
+                        return 0.0
+                    
+                    data = await response.json()
+                    if not data or not isinstance(data, list) or not data[0]:
+                        return 0.0
+                    
+                    token_data = data[0]
+                    
+                    # Calculate market cap based on supply and price
+                    supply = float(token_data.get("supply", 0))
+                    price_usd = float(token_data.get("priceUsd", 0))
+                    
+                    market_cap = supply * price_usd
+                    logging.debug(f"Calculated market cap for {token_address}: ${market_cap:,.2f}")
+                    
+                    return market_cap
+                    
+        except Exception as e:
+            logging.error(f"Error calculating market cap: {e}")
+            return 0.0
 
     async def analyze_token(self, token_address: str) -> Optional[TokenMetrics]:
-        """Comprehensive token analysis (from v7)"""
-        # TODO: Implement full token analysis
-        return None
+        """Comprehensive token analysis including holder analysis and trading patterns"""
+        try:
+            # Initialize metrics
+            metrics = TokenMetrics(
+                address=token_address,
+                total_holders=0,
+                dev_sells=0,
+                sniper_buys=0,
+                insider_buys=0,
+                buy_count=0,
+                sell_count=0,
+                large_holders=0,
+                total_supply=0,
+                holder_balances={},
+                market_cap=0
+            )
+            
+            # Fetch token data and holder information
+            async with aiohttp.ClientSession() as session:
+                # Get token metadata
+                url = f"https://api.helius.xyz/v0/token-metadata?api-key={HELIUS_API_KEY}"
+                async with session.post(url, json={"mintAccounts": [token_address]}) as response:
+                    if response.status != 200:
+                        logging.error(f"Error fetching token metadata: {await response.text()}")
+                        return None
+                        
+                    data = await response.json()
+                    if not data or not isinstance(data, list) or not data[0]:
+                        return None
+                    
+                    token_data = data[0]
+                    
+                    # Update basic metrics
+                    metrics.total_supply = float(token_data.get("mint", {}).get("supply", 0))
+                    metrics.market_cap = await self.get_market_cap(token_address)
+                    
+                    # Get holder information
+                    url = f"https://api.helius.xyz/v0/addresses/{token_address}/holders?api-key={HELIUS_API_KEY}"
+                    async with session.get(url) as response:
+                        if response.status == 200:
+                            holders_data = await response.json()
+                            
+                            # Process holder data
+                            for holder in holders_data.get("holders", []):
+                                amount = float(holder.get("amount", 0))
+                                owner = holder.get("owner")
+                                
+                                if owner and amount > 0:
+                                    metrics.holder_balances[owner] = amount
+                                    
+                                    # Check if this is a large holder (>1% of supply)
+                                    if amount > (metrics.total_supply * 0.01):
+                                        metrics.large_holders += 1
+                            
+                            metrics.total_holders = len(metrics.holder_balances)
+                    
+                    # Get recent transactions
+                    url = f"https://api.helius.xyz/v0/addresses/{token_address}/transactions?api-key={HELIUS_API_KEY}"
+                    async with session.get(url) as response:
+                        if response.status == 200:
+                            tx_data = await response.json()
+                            
+                            # Analyze trading patterns
+                            for tx in tx_data:
+                                if "tokenTransfers" in tx:
+                                    for transfer in tx["tokenTransfers"]:
+                                        if transfer.get("mint") == token_address:
+                                            from_addr = transfer.get("fromUserAccount")
+                                            to_addr = transfer.get("toUserAccount")
+                                            
+                                            # Count buys and sells
+                                            if from_addr in self.known_insiders:
+                                                metrics.insider_buys += 1
+                                            if to_addr in self.known_snipers:
+                                                metrics.sniper_buys += 1
+                                                
+                                            if "buy" in tx.get("type", "").lower():
+                                                metrics.buy_count += 1
+                                            elif "sell" in tx.get("type", "").lower():
+                                                metrics.sell_count += 1
+            
+            logging.info(f"Completed analysis for {token_address}: {metrics}")
+            return metrics
+            
+        except Exception as e:
+            logging.error(f"Error analyzing token: {e}")
+            return None
 
     async def check_price_alerts(self, token_address: str, current_price: float):
         """Check and trigger price alerts (from v9)"""
