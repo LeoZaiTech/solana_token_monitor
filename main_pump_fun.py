@@ -11,6 +11,7 @@ from dataclasses import dataclass
 import websockets
 from discord_webhook import DiscordWebhook
 from dotenv import load_dotenv
+from rate_limiter import registry as rate_limiter_registry
 
 # Load environment variables
 load_dotenv()
@@ -90,7 +91,9 @@ class TokenMonitorCascade:
         self.known_snipers = set()
         self.known_insiders = set()
         self.blacklisted_deployers = set()
-        self.token_monitor = TokenMonitor(db_file)  # Add TokenMonitor instance
+        self.token_monitor = TokenMonitor(db_file)  
+        self.helius_limiter = rate_limiter_registry.get_limiter('helius')
+        self.jupiter_limiter = rate_limiter_registry.get_limiter('jupiter')
         self.init_db()
 
     def init_db(self):
@@ -278,72 +281,81 @@ class TokenMonitorCascade:
             logging.error(f"Error handling new token: {e}")
 
     async def _monitor_token_market_cap(self, token_address: str):
-        """Monitor token's market cap with exponential backoff"""
+        """Monitor token's market cap with exponential backoff and rate limiting"""
         backoff = 1
         max_backoff = 300  # 5 minutes
         max_attempts = 100  # Stop after ~8 hours if token never reaches threshold
-        
+
         for attempt in range(max_attempts):
             try:
-                # Monitor market cap
-                await self.token_monitor.monitor_market_cap(token_address)
-                
-                # Sleep with exponential backoff
+                market_cap = await self.get_market_cap(token_address)
+                if market_cap >= 30000:  # 30k threshold
+                    logging.info(f"Token {token_address} reached 30k market cap!")
+                    await self.analyze_token(token_address)
+                    break
+
+                # Exponential backoff
                 await asyncio.sleep(backoff)
                 backoff = min(backoff * 2, max_backoff)
-                
+
             except Exception as e:
                 logging.error(f"Error monitoring market cap: {e}")
                 await asyncio.sleep(backoff)
                 backoff = min(backoff * 2, max_backoff)
 
-    async def monitor_token(self, token_address: str):
-        """Monitor individual token (from v8)"""
-        while True:
-            try:
-                # Get market cap
-                market_cap = await self.get_market_cap(token_address)
-                
-                if market_cap >= 30000:  # Only analyze if above 30k
-                    metrics = await self.analyze_token(token_address)
-                    if metrics:
-                        await self.check_price_alerts(token_address, market_cap)
-                        
-                await asyncio.sleep(30)
-                
-            except Exception as e:
-                logging.error(f"Error monitoring token {token_address}: {e}")
-                await asyncio.sleep(60)
-
     async def get_market_cap(self, token_address: str) -> float:
         """Calculate token market cap using bonding curve and current liquidity"""
         try:
-            # Fetch token data from Helius API
-            async with aiohttp.ClientSession() as session:
-                url = f"https://api.helius.xyz/v0/tokens?api-key={HELIUS_API_KEY}"
-                async with session.post(url, json={"mints": [token_address]}) as response:
-                    if response.status != 200:
-                        logging.error(f"Error fetching token data: {await response.text()}")
-                        return 0.0
-                    
-                    data = await response.json()
-                    if not data or not isinstance(data, list) or not data[0]:
-                        return 0.0
-                    
-                    token_data = data[0]
-                    
-                    # Calculate market cap based on supply and price
-                    supply = float(token_data.get("supply", 0))
-                    price_usd = float(token_data.get("priceUsd", 0))
-                    
-                    market_cap = supply * price_usd
-                    logging.debug(f"Calculated market cap for {token_address}: ${market_cap:,.2f}")
-                    
-                    return market_cap
-                    
+            # Get token metadata with rate limiting
+            metadata = await self.helius_limiter.execute_with_retry(
+                self._get_token_metadata,
+                token_address
+            )
+            if not metadata:
+                return 0
+
+            # Get price with rate limiting
+            price = await self.jupiter_limiter.execute_with_retry(
+                self._get_token_price,
+                token_address
+            )
+            if not price:
+                return 0
+
+            supply = metadata.get('supply', 0)
+            return float(supply) * price
+
         except Exception as e:
             logging.error(f"Error calculating market cap: {e}")
-            return 0.0
+            return 0
+
+    async def _get_token_metadata(self, token_address: str):
+        async with aiohttp.ClientSession() as session:
+            url = f"https://api.helius.xyz/v0/token-metadata?api-key={HELIUS_API_KEY}"
+            async with session.post(url, json={"mintAccounts": [token_address]}) as response:
+                if response.status != 200:
+                    logging.error(f"Error fetching token metadata: {await response.text()}")
+                    return None
+                    
+                data = await response.json()
+                if not data or not isinstance(data, list) or not data[0]:
+                    return None
+                    
+                return data[0]
+
+    async def _get_token_price(self, token_address: str):
+        async with aiohttp.ClientSession() as session:
+            url = f"https://api.helius.xyz/v0/tokens?api-key={HELIUS_API_KEY}"
+            async with session.post(url, json={"mints": [token_address]}) as response:
+                if response.status != 200:
+                    logging.error(f"Error fetching token price: {await response.text()}")
+                    return None
+                    
+                data = await response.json()
+                if not data or not isinstance(data, list) or not data[0]:
+                    return None
+                    
+                return float(data[0].get("priceUsd", 0))
 
     async def analyze_token(self, token_address: str) -> Optional[TokenMetrics]:
         """Comprehensive token analysis including holder analysis and trading patterns"""

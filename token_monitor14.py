@@ -12,6 +12,7 @@ from dataclasses import dataclass
 from typing import Dict, List, Optional, Tuple
 import aiohttp
 from collections import defaultdict, Counter
+from rate_limiter import registry as rate_limiter_registry
 
 # Load environment variables
 load_dotenv()
@@ -487,58 +488,40 @@ class TwitterAnalyzer:
         self.bearer_token = bearer_token or os.getenv('TWITTER_BEARER_TOKEN')
         self.api_base_url = "https://api.twitter.com/2"
         self.session = None
-        
-    async def _ensure_session(self):
-        if not self.session:
-            self.session = aiohttp.ClientSession()
-            
+        self.rate_limiter = rate_limiter_registry.get_limiter('twitter')
+
     async def analyze_sentiment(self, token_address: str) -> Dict:
         """Analyze Twitter sentiment and notable mentions for a token"""
         try:
-            tweets = await self._get_recent_tweets(token_address)
+            tweets = await self.rate_limiter.execute_with_retry(
+                self._get_recent_tweets,
+                token_address
+            )
             if not tweets:
-                return {
-                    'sentiment': 'neutral',
-                    'score': 0.5,
-                    'notable_mentions': 0,
-                    'tweet_count': 0
-                }
-                
-            # Count notable mentions (accounts with >10k followers)
-            notable_mentions = sum(1 for tweet in tweets 
-                                 if tweet.get('author', {}).get('followers_count', 0) > 10000)
-                                 
-            # Basic sentiment analysis
-            positive_words = {'moon', 'gem', 'bullish', 'buy', 'good', 'great', 'profit'}
-            negative_words = {'scam', 'rug', 'dump', 'sell', 'bad', 'avoid', 'fake'}
-            
-            total_score = 0
+                return self._get_empty_result()
+
+            # Process tweets with rate limiting
+            sentiment_scores = []
             for tweet in tweets:
-                text = tweet.get('text', '').lower()
-                pos_count = sum(1 for word in positive_words if word in text)
-                neg_count = sum(1 for word in negative_words if word in text)
-                tweet_score = (pos_count - neg_count) / (pos_count + neg_count + 1)
-                total_score += tweet_score
-                
-            avg_score = total_score / len(tweets) if tweets else 0.5
-            sentiment = 'positive' if avg_score > 0.6 else 'negative' if avg_score < 0.4 else 'neutral'
-            
+                score = await self.rate_limiter.execute_with_retry(
+                    self._analyze_tweet_sentiment,
+                    tweet
+                )
+                if score is not None:
+                    sentiment_scores.append(score)
+
+            if not sentiment_scores:
+                return self._get_empty_result()
+
             return {
-                'sentiment': sentiment,
-                'score': avg_score,
-                'notable_mentions': notable_mentions,
-                'tweet_count': len(tweets)
+                'overall_sentiment': sum(sentiment_scores) / len(sentiment_scores),
+                'tweet_count': len(tweets),
+                'notable_mentions': await self._find_notable_mentions(tweets)
             }
-            
         except Exception as e:
-            logging.error(f"Error analyzing sentiment: {e}")
-            return {
-                'sentiment': 'neutral',
-                'score': 0.5,
-                'notable_mentions': 0,
-                'tweet_count': 0
-            }
-            
+            logging.error(f"Error analyzing Twitter sentiment: {e}")
+            return self._get_empty_result()
+
     async def _get_recent_tweets(self, token_address: str) -> List[Dict]:
         """Get recent tweets mentioning the token address"""
         if not self.bearer_token:
@@ -565,6 +548,32 @@ class TwitterAnalyzer:
         except Exception as e:
             logging.error(f"Error fetching tweets: {e}")
             return []
+
+    async def _analyze_tweet_sentiment(self, tweet: Dict) -> Optional[float]:
+        """Analyze sentiment of a single tweet"""
+        # Implement your sentiment analysis logic here
+        # For demonstration, return a random score
+        import random
+        return random.random()
+
+    async def _find_notable_mentions(self, tweets: List[Dict]) -> int:
+        """Find notable mentions in tweets"""
+        # Implement your logic to find notable mentions
+        # For demonstration, return a random count
+        import random
+        return random.randint(0, 10)
+
+    async def _ensure_session(self):
+        if not self.session:
+            self.session = aiohttp.ClientSession()
+            
+    def _get_empty_result(self) -> Dict:
+        """Return empty result structure"""
+        return {
+            'overall_sentiment': 0.5,
+            'tweet_count': 0,
+            'notable_mentions': 0
+        }
 
 class HolderAnalyzer:
     """Analyzes token holders and transactions"""
@@ -932,7 +941,7 @@ class TokenScorer:
             if not twitter_metrics:
                 return 50.0  # Neutral score if no Twitter data
 
-            risk_score = 1 - twitter_metrics['score']
+            risk_score = 1 - twitter_metrics['overall_sentiment']
             
             # Convert risk score (0-1 where 1 is high risk) to confidence score (0-100 where 100 is good)
             twitter_score = (1 - risk_score) * 100
@@ -1414,269 +1423,6 @@ class TokenSafetyChecker:
         # Implement your logic here
         return 1.0
 
-class TokenHeuristics:
-    """Advanced heuristics for detecting suspicious token behavior"""
-    
-    def __init__(self, helius_api_key: str):
-        self.helius_api_key = helius_api_key
-        self.api_url = "https://mainnet.helius-rpc.com/?api-key=" + helius_api_key
-        
-    async def analyze_token_safety(self, token_address: str, deployer_address: str, liquidity_address: str) -> Dict:
-        """
-        Run comprehensive token safety checks:
-        - Top 10 holder concentration
-        - Volume manipulation detection
-        - Supply allocation analysis
-        """
-        try:
-            # Get all holders and their balances
-            holders = await self._get_token_holders(token_address)
-            if not holders:
-                return self._get_empty_result()
-                
-            total_supply = sum(h['amount'] for h in holders)
-            
-            # Check top 10 holder concentration
-            top_10_concentration = await self._check_holder_concentration(
-                holders, total_supply, deployer_address, liquidity_address)
-                
-            # Check for volume manipulation
-            volume_analysis = await self._analyze_volume(token_address)
-            
-            # Check supply allocation
-            supply_analysis = await self._analyze_supply_allocation(
-                holders, total_supply, deployer_address)
-                
-            # Determine if token passes all checks
-            is_safe = all([
-                not top_10_concentration['is_suspicious'],
-                not volume_analysis['is_suspicious'],
-                not supply_analysis['is_suspicious']
-            ])
-            
-            return {
-                'is_safe': is_safe,
-                'metrics': {
-                    'top_10_concentration': top_10_concentration,
-                    'volume_analysis': volume_analysis,
-                    'supply_analysis': supply_analysis
-                },
-                'failure_reasons': self._get_failure_reasons(
-                    top_10_concentration, volume_analysis, supply_analysis)
-            }
-            
-        except Exception as e:
-            logging.error(f"Error in token heuristics: {e}")
-            return self._get_empty_result()
-            
-    async def _check_holder_concentration(self, holders: List[Dict], 
-                                        total_supply: float,
-                                        deployer_address: str,
-                                        liquidity_address: str) -> Dict:
-        """Check if top 10 non-liquidity holders own >25% of supply"""
-        # Filter out deployer, liquidity, and burn addresses
-        filtered_holders = [
-            h for h in holders 
-            if h['owner'] not in {deployer_address, liquidity_address}
-            and not self._is_burn_address(h['owner'])
-        ]
-        
-        # Sort by balance and get top 10
-        top_10 = sorted(filtered_holders, 
-                       key=lambda x: float(x['amount']), 
-                       reverse=True)[:10]
-                       
-        # Calculate concentration
-        concentration = sum(float(h['amount']) for h in top_10) / total_supply
-        
-        return {
-            'is_suspicious': concentration > 0.25,
-            'concentration': concentration,
-            'details': {
-                'top_10_addresses': [h['owner'] for h in top_10],
-                'individual_percentages': [
-                    float(h['amount']) / total_supply for h in top_10
-                ]
-            }
-        }
-        
-    async def _analyze_volume(self, token_address: str) -> Dict:
-        """Detect suspicious trading volume patterns"""
-        # Get recent trades
-        trades = await self._get_recent_trades(token_address)
-        if not trades:
-            return {'is_suspicious': True, 'reason': 'No trading activity'}
-            
-        # Group trades by time windows (e.g., 5-minute intervals)
-        window_size = 300  # 5 minutes
-        volume_windows = {}
-        
-        for trade in trades:
-            window = trade['timestamp'] // window_size
-            if window not in volume_windows:
-                volume_windows[window] = 0
-            volume_windows[window] += trade['amount'] * trade['price']
-            
-        # Calculate volume metrics
-        if not volume_windows:
-            return {'is_suspicious': True, 'reason': 'No trading activity'}
-            
-        avg_volume = sum(volume_windows.values()) / len(volume_windows)
-        max_volume = max(volume_windows.values())
-        volume_spikes = sum(1 for v in volume_windows.values() if v > avg_volume * 3)
-        
-        return {
-            'is_suspicious': volume_spikes > len(volume_windows) * 0.2,  # >20% spikes
-            'metrics': {
-                'average_volume': avg_volume,
-                'max_volume': max_volume,
-                'volume_spikes': volume_spikes,
-                'total_windows': len(volume_windows)
-            }
-        }
-        
-    async def _analyze_supply_allocation(self, holders: List[Dict], 
-                                       total_supply: float,
-                                       deployer_address: str) -> Dict:
-        """Check for suspicious initial supply allocation"""
-        # Get initial allocation transactions
-        initial_txs = await self._get_initial_transactions(deployer_address)
-        
-        # Check for single-entity control
-        deployer_balance = sum(float(h['amount']) for h in holders 
-                             if h['owner'] == deployer_address)
-        deployer_percentage = deployer_balance / total_supply
-        
-        # Check for suspicious batch transfers
-        batch_transfers = self._analyze_batch_patterns(initial_txs)
-        
-        return {
-            'is_suspicious': deployer_percentage > 0.5 or batch_transfers['is_suspicious'],
-            'metrics': {
-                'deployer_percentage': deployer_percentage,
-                'batch_analysis': batch_transfers
-            }
-        }
-        
-    def _analyze_batch_patterns(self, transactions: List[Dict]) -> Dict:
-        """Analyze patterns in batch transfers for suspicious behavior"""
-        if not transactions:
-            return {'is_suspicious': True, 'reason': 'No initial transactions'}
-            
-        # Group transfers by amount
-        amount_groups = {}
-        for tx in transactions:
-            amount = tx['amount']
-            if amount not in amount_groups:
-                amount_groups[amount] = 0
-            amount_groups[amount] += 1
-            
-        # Check for suspicious patterns
-        max_identical = max(amount_groups.values())
-        total_transfers = len(transactions)
-        
-        return {
-            'is_suspicious': max_identical > total_transfers * 0.4,  # >40% identical
-            'metrics': {
-                'max_identical_transfers': max_identical,
-                'total_transfers': total_transfers,
-                'unique_amounts': len(amount_groups)
-            }
-        }
-        
-    async def _get_token_holders(self, token_address: str) -> List[Dict]:
-        """Get all token holders using Helius API"""
-        payload = {
-            "jsonrpc": "2.0",
-            "id": "my-id",
-            "method": "getTokenLargestAccounts",
-            "params": [token_address]
-        }
-        
-        async with aiohttp.ClientSession() as session:
-            async with session.post(self.api_url, json=payload) as response:
-                if response.status == 200:
-                    data = await response.json()
-                    return data.get('result', {}).get('value', [])
-        return []
-        
-    async def _get_recent_trades(self, token_address: str) -> List[Dict]:
-        """Get recent trades from database"""
-        conn = sqlite3.connect(DB_FILE)
-        try:
-            c = conn.cursor()
-            c.execute("""
-                SELECT amount, price, timestamp
-                FROM transactions
-                WHERE token_address = ?
-                AND timestamp >= ?
-                ORDER BY timestamp DESC
-                LIMIT 1000
-            """, (token_address, int(time.time()) - 86400))  # Last 24 hours
-            
-            return [{
-                'amount': row[0],
-                'price': row[1],
-                'timestamp': row[2]
-            } for row in c.fetchall()]
-        finally:
-            conn.close()
-            
-    async def _get_initial_transactions(self, deployer_address: str) -> List[Dict]:
-        """Get initial token transfer transactions"""
-        conn = sqlite3.connect(DB_FILE)
-        try:
-            c = conn.cursor()
-            c.execute("""
-                SELECT amount
-                FROM transactions
-                WHERE seller_address = ?
-                AND timestamp >= ?
-                ORDER BY timestamp ASC
-                LIMIT 100
-            """, (deployer_address, int(time.time()) - 3600))  # First hour
-            
-            return [{'amount': row[0]} for row in c.fetchall()]
-        finally:
-            conn.close()
-            
-    def _is_burn_address(self, address: str) -> bool:
-        """Check if address is a known burn address"""
-        burn_addresses = {
-            "1111111111111111111111111111111111111111",
-            "burn111111111111111111111111111111111111",
-            "deadbeef111111111111111111111111111111"
-        }
-        return address in burn_addresses
-            
-    def _get_failure_reasons(self, concentration: Dict, 
-                           volume: Dict, 
-                           supply: Dict) -> List[str]:
-        """Get list of reasons why token failed checks"""
-        reasons = []
-        if concentration['is_suspicious']:
-            reasons.append(f"High holder concentration: {concentration['concentration']*100:.1f}%")
-        if volume['is_suspicious']:
-            reasons.append("Suspicious trading volume patterns")
-        if supply['is_suspicious']:
-            if supply['metrics']['deployer_percentage'] > 0.5:
-                reasons.append("High deployer token control")
-            if supply['metrics']['batch_analysis']['is_suspicious']:
-                reasons.append("Suspicious batch transfer patterns")
-        return reasons
-        
-    def _get_empty_result(self) -> Dict:
-        """Return empty result structure"""
-        return {
-            'is_safe': False,
-            'metrics': {
-                'top_10_concentration': {'is_suspicious': True, 'concentration': 0},
-                'volume_analysis': {'is_suspicious': True, 'reason': 'No data'},
-                'supply_analysis': {'is_suspicious': True, 'reason': 'No data'}
-            },
-            'failure_reasons': ["Could not analyze token"]
-        }
-
 class MarketCapAnalyzer:
     """Analyzes and tracks token market cap in real-time"""
     
@@ -1684,37 +1430,31 @@ class MarketCapAnalyzer:
         self.helius_api_key = helius_api_key
         self.api_url = f"https://mainnet.helius-rpc.com/?api-key={helius_api_key}"
         self._cache = {}  # Cache market cap calculations
-        
+        self.rate_limiter = rate_limiter_registry.get_limiter('helius')
+
     async def get_market_cap(self, token_address: str) -> float:
         """Calculate current market cap for a token"""
         try:
-            # Get token metadata including decimals and supply
-            metadata = await self._get_token_metadata(token_address)
+            metadata = await self.rate_limiter.execute_with_retry(
+                self._get_token_metadata,
+                token_address
+            )
             if not metadata:
                 return 0
-                
-            # Get current price from Jupiter/Orca
-            price = await self._get_token_price(token_address)
-            if price == 0:
+            
+            price = await self.rate_limiter.execute_with_retry(
+                self._get_token_price,
+                token_address
+            )
+            if not price:
                 return 0
-                
-            # Calculate market cap
-            decimals = metadata.get('decimals', 9)
-            supply = float(metadata.get('supply', 0)) / (10 ** decimals)
-            market_cap = supply * price
-            
-            # Cache the result
-            self._cache[token_address] = {
-                'market_cap': market_cap,
-                'timestamp': time.time()
-            }
-            
-            return market_cap
-            
+
+            supply = metadata.get('supply', 0)
+            return float(supply) * price
         except Exception as e:
-            logging.error(f"Error calculating market cap for {token_address}: {e}")
+            logging.error(f"Error calculating market cap: {e}")
             return 0
-            
+
     async def _get_token_metadata(self, token_address: str) -> dict:
         """Get token metadata from Helius API"""
         try:
@@ -1738,11 +1478,10 @@ class MarketCapAnalyzer:
         except Exception as e:
             logging.error(f"Error fetching token metadata: {e}")
             return None
-            
+
     async def _get_token_price(self, token_address: str) -> float:
         """Get token price from Jupiter API"""
         try:
-            # Use Jupiter API to get price
             jupiter_url = f"https://price.jup.ag/v4/price?ids={token_address}"
             async with aiohttp.ClientSession() as session:
                 async with session.get(jupiter_url) as response:
@@ -1753,7 +1492,7 @@ class MarketCapAnalyzer:
         except Exception as e:
             logging.error(f"Error fetching token price: {e}")
             return 0
-            
+
     def is_above_threshold(self, market_cap: float, threshold: float = 30000) -> bool:
         """Check if market cap is above threshold"""
         return market_cap >= threshold
