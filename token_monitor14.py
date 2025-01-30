@@ -763,6 +763,133 @@ class HolderAnalyzer:
                     return data.get('result', {})
         return {}
 
+class TopHolderAnalyzer:
+    """Analyzes performance of top token holders"""
+    
+    def __init__(self, helius_api_key: str):
+        self.helius_api_key = helius_api_key
+        self.api_url = "https://mainnet.helius-rpc.com/?api-key=" + helius_api_key
+        
+    async def analyze_top_holders(self, token_address: str, deployer_address: str, liquidity_address: str) -> Dict:
+        """
+        Analyze top 30 holders' performance:
+        - 14-day win rate (tokens reaching 1M from <100k)
+        - 30-day PNL
+        """
+        try:
+            # Get top holders excluding deployer and liquidity
+            holders = await self._get_top_holders(token_address, deployer_address, liquidity_address)
+            if not holders:
+                return self._get_empty_result()
+                
+            # Calculate metrics for each holder
+            holder_metrics = []
+            for holder in holders[:30]:  # Top 30 holders
+                metrics = await self._calculate_holder_metrics(holder['owner'])
+                holder_metrics.append({
+                    'address': holder['owner'],
+                    'balance': holder['amount'],
+                    'win_rate': metrics['win_rate'],
+                    'pnl_30d': metrics['pnl_30d']
+                })
+                
+            # Calculate average metrics
+            avg_win_rate = sum(h['win_rate'] for h in holder_metrics) / len(holder_metrics)
+            avg_pnl = sum(h['pnl_30d'] for h in holder_metrics) / len(holder_metrics)
+            
+            return {
+                'holder_metrics': holder_metrics,
+                'summary': {
+                    'avg_win_rate': avg_win_rate,
+                    'avg_pnl_30d': avg_pnl,
+                    'total_analyzed': len(holder_metrics)
+                }
+            }
+            
+        except Exception as e:
+            logging.error(f"Error analyzing top holders: {e}")
+            return self._get_empty_result()
+            
+    async def _get_top_holders(self, token_address: str, deployer_address: str, liquidity_address: str) -> List[Dict]:
+        """Get top token holders excluding deployer and liquidity"""
+        payload = {
+            "jsonrpc": "2.0",
+            "id": "my-id",
+            "method": "getTokenLargestAccounts",
+            "params": [token_address]
+        }
+        
+        async with aiohttp.ClientSession() as session:
+            async with session.post(self.api_url, json=payload) as response:
+                if response.status == 200:
+                    data = await response.json()
+                    holders = data.get('result', {}).get('value', [])
+                    
+                    # Filter out deployer and liquidity addresses
+                    return [h for h in holders 
+                           if h['owner'] not in {deployer_address, liquidity_address}]
+        return []
+        
+    async def _calculate_holder_metrics(self, holder_address: str) -> Dict:
+        """Calculate win rate and PNL for a holder"""
+        two_weeks_ago = int(time.time()) - (14 * 24 * 60 * 60)
+        thirty_days_ago = int(time.time()) - (30 * 24 * 60 * 60)
+        
+        conn = sqlite3.connect(DB_FILE)
+        try:
+            c = conn.cursor()
+            
+            # Get 14-day win rate
+            c.execute("""
+                SELECT COUNT(*) as total_tokens,
+                       SUM(CASE WHEN peak_market_cap >= 1000000 THEN 1 ELSE 0 END) as winning_tokens
+                FROM transactions t
+                JOIN tokens tok ON t.token_address = tok.address
+                WHERE t.buyer_address = ?
+                AND t.timestamp >= ?
+                AND tok.market_cap <= 100000
+                GROUP BY t.buyer_address
+            """, (holder_address, two_weeks_ago))
+            
+            row = c.fetchone()
+            total_tokens = row[0] if row else 0
+            winning_tokens = row[1] if row else 0
+            win_rate = winning_tokens / total_tokens if total_tokens > 0 else 0
+            
+            # Calculate 30-day PNL
+            c.execute("""
+                SELECT SUM(
+                    CASE 
+                        WHEN transaction_type = 'buy' THEN -amount * price
+                        ELSE amount * price
+                    END
+                ) as pnl
+                FROM transactions
+                WHERE (buyer_address = ? OR seller_address = ?)
+                AND timestamp >= ?
+            """, (holder_address, holder_address, thirty_days_ago))
+            
+            pnl = c.fetchone()[0] or 0
+            
+            return {
+                'win_rate': win_rate,
+                'pnl_30d': pnl
+            }
+            
+        finally:
+            conn.close()
+            
+    def _get_empty_result(self) -> Dict:
+        """Return empty result structure"""
+        return {
+            'holder_metrics': [],
+            'summary': {
+                'avg_win_rate': 0,
+                'avg_pnl_30d': 0,
+                'total_analyzed': 0
+            }
+        }
+
 class TokenScorer:
     def __init__(self, db_file: str):
         self.db_file = db_file
