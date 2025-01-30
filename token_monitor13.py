@@ -493,12 +493,119 @@ class TwitterAnalyzer:
     async def analyze_token(self, token_address: str) -> Optional[Dict]:
         """Analyze Twitter presence for a token"""
         if not self.bearer_token:
+            return {'sentiment_score': 0.5}  # Default neutral score if no Twitter access
+
+        try:
+            await self._ensure_session()
+            twitter_handle = await self._get_twitter_handle(token_address)
+            
+            metrics = {
+                'sentiment_score': 0.5,  # Start neutral
+                'name_changes': 0,
+                'followers': 0,
+                'risk_factors': []
+            }
+
+            if twitter_handle:
+                # Get user data
+                user_data = await self._get_user_data(twitter_handle)
+                if user_data:
+                    metrics.update({
+                        'followers': user_data.get('public_metrics', {}).get('followers_count', 0),
+                        'creation_date': user_data.get('created_at'),
+                        'verified': user_data.get('verified', False)
+                    })
+                    
+                    # Check name changes
+                    name_changes = await self._get_name_changes(token_address)
+                    metrics['name_changes'] = name_changes
+                    if name_changes > 2:
+                        metrics['risk_factors'].append('multiple_name_changes')
+
+            return metrics
+
+        except Exception as e:
+            logging.error(f"Error in Twitter analysis: {str(e)}")
+            return {'sentiment_score': 0.5}  # Default to neutral on error
+
+    async def _ensure_session(self):
+        """Ensure aiohttp session exists"""
+        if self.session is None or self.session.closed:
+            self.session = aiohttp.ClientSession(headers={
+                "Authorization": f"Bearer {self.bearer_token}"
+            })
+
+    async def _get_twitter_handle(self, token_address: str) -> Optional[str]:
+        """Get Twitter handle from database"""
+        conn = sqlite3.connect(DB_FILE)
+        try:
+            c = conn.cursor()
+            c.execute("SELECT twitter_handle FROM tokens WHERE address = ?", (token_address,))
+            result = c.fetchone()
+            return result[0] if result else None
+        finally:
+            conn.close()
+
+    async def _get_user_data(self, username: str) -> Optional[Dict]:
+        """Fetch user data from Twitter API"""
+        if not self.bearer_token:
             return None
-        return {'sentiment_score': 0.5}  # Placeholder for now
+
+        try:
+            url = f"{self.api_base_url}/users/by/username/{username}"
+            params = {
+                "user.fields": "public_metrics,created_at,verified"
+            }
+            async with self.session.get(url, params=params) as response:
+                if response.status == 200:
+                    data = await response.json()
+                    return data.get('data')
+                return None
+        except Exception as e:
+            logging.error(f"Error fetching Twitter user data: {str(e)}")
+            return None
+
+    async def _get_name_changes(self, token_address: str) -> int:
+        """Get number of name changes from database"""
+        conn = sqlite3.connect(DB_FILE)
+        try:
+            c = conn.cursor()
+            c.execute("SELECT twitter_name_changes FROM tokens WHERE address = ?", (token_address,))
+            result = c.fetchone()
+            return result[0] if result else 0
+        finally:
+            conn.close()
 
     def calculate_risk_score(self, metrics: Dict) -> float:
         """Calculate risk score from Twitter metrics"""
-        return 0.5  # Neutral score for now
+        if not metrics:
+            return 0.5  # Neutral score if no metrics
+        
+        risk_score = 0.5  # Start neutral
+        
+        # Account age (newer accounts are riskier)
+        if metrics.get('creation_date'):
+            account_age_days = (datetime.now() - datetime.fromisoformat(metrics['creation_date'].replace('Z', '+00:00'))).days
+            if account_age_days < 30:
+                risk_score += 0.2
+            elif account_age_days < 90:
+                risk_score += 0.1
+        
+        # Follower count (fewer followers are riskier)
+        followers = metrics.get('followers', 0)
+        if followers < 100:
+            risk_score += 0.2
+        elif followers < 1000:
+            risk_score += 0.1
+        
+        # Name changes (more changes are riskier)
+        name_changes = metrics.get('name_changes', 0)
+        if name_changes > 2:
+            risk_score += 0.2
+        elif name_changes > 0:
+            risk_score += 0.1
+        
+        return min(1.0, max(0.0, risk_score))  # Ensure score is between 0 and 1
 
 class TokenScorer:
     def __init__(self, db_file: str):
