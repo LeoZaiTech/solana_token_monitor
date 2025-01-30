@@ -230,23 +230,27 @@ class TokenMonitorCascade:
     async def handle_new_token(self, token_data: Dict):
         """Process new token creation with enhanced validation"""
         try:
+            logging.info("[NOTIFY DEBUG] Starting handle_new_token")
             token_address = token_data["address"]
-            logging.info(f"Processing potential new token: {token_address}")
+            logging.info(f"[NOTIFY DEBUG] Processing token: {token_address}")
             
             # Validate token using Helius API
             async with aiohttp.ClientSession() as session:
                 url = f"https://api.helius.xyz/v0/token-metadata?api-key={HELIUS_API_KEY}"
+                logging.info(f"[NOTIFY DEBUG] Fetching metadata from Helius")
+                
                 async with session.post(url, json={"mintAccounts": [token_address]}) as response:
                     if response.status != 200:
-                        logging.error(f"Error validating token: {await response.text()}")
+                        logging.error(f"[NOTIFY DEBUG] Helius API error: {await response.text()}")
                         return
                         
                     data = await response.json()
                     if not data or not isinstance(data, list) or not data[0]:
-                        logging.warning(f"Invalid token data for {token_address}")
+                        logging.warning(f"[NOTIFY DEBUG] Invalid token data structure")
                         return
                     
                     token_info = data[0]
+                    logging.info("[NOTIFY DEBUG] Successfully got token info")
                     
                     # Extract token metadata
                     token_name = token_info.get("onChainMetadata", {}).get("metadata", {}).get("data", {}).get("name", "Unknown")
@@ -266,6 +270,8 @@ class TokenMonitorCascade:
                     # First check if token already exists
                     c.execute('SELECT address FROM tokens WHERE address = ?', (token_address,))
                     if c.fetchone() is None:
+                        logging.info("[NOTIFY DEBUG] New token found, preparing notification")
+                        
                         c.execute('''
                             INSERT INTO tokens 
                             (address, deployer_address, creation_time, last_updated, name, symbol, decimals, total_supply) 
@@ -294,26 +300,91 @@ class TokenMonitorCascade:
                             ''', (deployer, deployer, int(time.time())))
                         
                         conn.commit()
+
+                        # Prepare transaction data for notification
+                        tx_data = [
+                            token_data.get("signature", ""),  # Transaction signature
+                            int(time.time()),  # Block time
+                            0,  # Transaction fee (placeholder)
+                            0, 0, 0, 0, 0,  # Placeholders for other metrics
+                            deployer,  # Deployer address
+                            0,  # Holder count (placeholder)
+                            0,  # Sniper count (placeholder)
+                            0,  # Insider count (placeholder)
+                            0,  # Buy/sell ratio (placeholder)
+                            0,  # High holder count (placeholder)
+                        ]
                         
-                        # Send notification for new token
-                        await self.send_notification(
-                            f"🆕 New Token Detected!\n" +
-                            f"Name: {token_name}\n" +
-                            f"Symbol: {token_symbol}\n" +
-                            f"Address: {token_address}\n" +
-                            f"Deployer: {deployer}\n" +
-                            f"Supply: {float(supply):,.0f}"
-                        )
+                        logging.info(f"[NOTIFY DEBUG] Prepared tx_data: {tx_data}")
+                        logging.info(f"[NOTIFY DEBUG] Discord webhook URL: {DISCORD_WEBHOOK_URL[:20]}...")
                         
-                        logging.info(f"Started monitoring new token: {token_name} ({token_address})")
+                        try:
+                            # Send notification using the standalone function
+                            logging.info("[NOTIFY DEBUG] Calling notify_discord")
+                            await self.notify_discord(tx_data)
+                            logging.info("[NOTIFY DEBUG] Notification call completed")
+                        except Exception as e:
+                            logging.error(f"[NOTIFY DEBUG] Error in notification: {str(e)}")
+                            logging.error("[NOTIFY DEBUG] Notification error traceback:", exc_info=True)
                         
                         # Start monitoring this token
                         asyncio.create_task(self.monitor_token(token_address))
+                    else:
+                        logging.info("[NOTIFY DEBUG] Token already exists, skipping")
                     
                     conn.close()
             
         except Exception as e:
-            logging.error(f"Error handling new token: {e}")
+            logging.error(f"[NOTIFY DEBUG] Error in handle_new_token: {str(e)}")
+            logging.error("[NOTIFY DEBUG] Error traceback:", exc_info=True)
+
+    async def notify_discord(self, tx_data):
+        """Send a detailed notification to Discord."""
+        try:
+            logging.info("[NOTIFY DEBUG] Starting notify_discord")
+            logging.info(f"[NOTIFY DEBUG] Using webhook URL: {DISCORD_WEBHOOK_URL[:20]}...")
+            
+            message = (
+                f"🚨 **New Token Transaction Alert!**\n\n"
+                f"**Transaction Signature:** `{tx_data[0]}`\n"
+                f"**Block Time:** {datetime.utcfromtimestamp(tx_data[1]).strftime('%Y-%m-%d %H:%M:%S UTC')}\n"
+                f"**Transaction Fee:** {tx_data[2] / 1e9:.8f} SOL\n"
+                f"**Deployer Address:** `{tx_data[8]}`\n"
+                f"**Holder Count:** {tx_data[9]}\n"
+                f"**Sniper Count:** {tx_data[10]}\n"
+                f"**Insider Count:** {tx_data[11]}\n"
+                f"**Buy/Sell Ratio:** {tx_data[12]}%\n"
+                f"**High Holder Count:** {tx_data[13]}\n\n"
+                f"🔗 [View on Solana Explorer](https://solscan.io/tx/{tx_data[0]})"
+            )
+            logging.info(f"[NOTIFY DEBUG] Prepared message: {message}")
+
+            logging.info("[NOTIFY DEBUG] Creating webhook")
+            webhook = DiscordWebhook(url=DISCORD_WEBHOOK_URL)
+            
+            logging.info("[NOTIFY DEBUG] Adding embed")
+            webhook.add_embed({
+                "title": "Transaction",
+                "description": message,
+                "color": 0x00ff00
+            })
+            
+            logging.info("[NOTIFY DEBUG] Executing webhook")
+            response = webhook.execute()
+            
+            if response:
+                logging.info(f"[NOTIFY DEBUG] Discord response status code: {response.status_code}")
+                logging.info(f"[NOTIFY DEBUG] Discord response text: {response.text}")
+                if response.status_code == 204:
+                    logging.info("[NOTIFY DEBUG] Notification sent successfully")
+                else:
+                    logging.error(f"[NOTIFY DEBUG] Error response from Discord: {response.text}")
+            else:
+                logging.error("[NOTIFY DEBUG] No response received from Discord")
+                
+        except Exception as e:
+            logging.error(f"[NOTIFY DEBUG] Error in notify_discord: {str(e)}")
+            logging.error("[NOTIFY DEBUG] Error traceback:", exc_info=True)
 
     async def monitor_token(self, token_address: str):
         """Monitor individual token (from v8)"""
@@ -475,8 +546,8 @@ class TokenMonitorCascade:
                     f"Target {'Above' if alert.is_above else 'Below'}: ${alert.target_price:.6f}"
                 )
 
-    async def send_notification(self, message: str):
-        """Send Discord notification (from v9)"""
+    async def send_notification(self, message: str, severity: str = "info"):
+        """Send notification to Discord"""
         try:
             webhook = DiscordWebhook(url=DISCORD_WEBHOOK_URL)
             webhook.add_embed({
@@ -485,7 +556,7 @@ class TokenMonitorCascade:
                 "color": 0x00ff00
             })
             response = webhook.execute()
-            if response.status_code != 204:
+            if response and response.status_code != 204:
                 logging.error(f"Error sending notification: {response.text}")
         except Exception as e:
             logging.error(f"Error sending notification: {e}")
