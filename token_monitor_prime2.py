@@ -2406,29 +2406,28 @@ def main():
 def notify_discord(tx_data):
     """Send a detailed notification to Discord."""
     try:
-        message = (
-            f"🚨 **New Token Transaction Alert!**\n\n"
-            f"**Transaction Signature:** `{tx_data[0]}`\n"
-            f"**Block Time:** {datetime.fromtimestamp(tx_data[1], timezone.utc).strftime('%Y-%m-%d %H:%M:%S UTC')}\n"
-            f"**Transaction Fee:** {tx_data[2] / 1e9:.8f} SOL\n"
-            f"**Deployer Address:** `{tx_data[8]}`\n"
-            f"**Holder Count:** {tx_data[9]}\n"
-            f"**Sniper Count:** {tx_data[10]}\n"
-            f"**Insider Count:** {tx_data[11]}\n"
-            f"**Buy/Sell Ratio:** {tx_data[12]}%\n"
-            f"**High Holder Count:** {tx_data[13]}\n\n"
-            f"🔗 [View on Solana Explorer](https://solscan.io/tx/{tx_data[0]})"
-        )
-
-        webhook = DiscordWebhook(url=DISCORD_WEBHOOK_URL)
-        webhook.add_embed({
-            "title": "Transaction",
-            "description": message,
+        embed = {
+            "title": "New Token Transaction Alert!",
+            "description": f"**Transaction Signature:** `{tx_data[0]}`\n"
+                            f"**Block Time:** {datetime.fromtimestamp(tx_data[1], timezone.utc).strftime('%Y-%m-%d %H:%M:%S UTC')}\n"
+                            f"**Transaction Fee:** {tx_data[2] / 1e9:.8f} SOL\n"
+                            f"**Deployer Address:** `{tx_data[8]}`\n"
+                            f"**Holder Count:** {tx_data[9]}\n"
+                            f"**Sniper Count:** {tx_data[10]}\n"
+                            f"**Insider Count:** {tx_data[11]}\n"
+                            f"**Buy/Sell Ratio:** {tx_data[12]}%\n"
+                            f"**High Holder Count:** {tx_data[13]}\n\n"
+                            f"🔗 [View on Solana Explorer](https://solscan.io/tx/{tx_data[0]})",
             "color": 0x00ff00  # Green color
-        })
+        }
+        
+        webhook = DiscordWebhook(url=DISCORD_WEBHOOK_URL)
+        webhook.add_embed(embed)
         
         response = webhook.execute()
-        if response.status_code != 204:
+        if response.status_code == 204:
+            logging.info("Discord notification sent successfully.")
+        else:
             logging.error(f"Error sending notification: {response.text}")
             
     except Exception as e:
