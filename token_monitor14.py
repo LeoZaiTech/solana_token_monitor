@@ -1434,10 +1434,8 @@ class TokenHeuristics:
             if not holders:
                 return self._get_empty_result()
                 
-            # Calculate total supply excluding burn addresses
-            total_supply = sum(h['amount'] for h in holders 
-                             if not self._is_burn_address(h['owner']))
-                
+            total_supply = sum(h['amount'] for h in holders)
+            
             # Check top 10 holder concentration
             top_10_concentration = await self._check_holder_concentration(
                 holders, total_supply, deployer_address, liquidity_address)
@@ -1739,6 +1737,241 @@ class TokenMonitor:
         response = webhook.execute()
         if response.status_code != 204:
             logging.error(f"Error sending price alert: {response.text}")
+
+class WalletTracker:
+    """Tracks and manages blacklisted and notable wallets"""
+    
+    def __init__(self, db_file: str):
+        self.db_file = db_file
+        self.init_db()
+        
+    def init_db(self):
+        """Initialize wallet tracking tables"""
+        conn = sqlite3.connect(self.db_file)
+        try:
+            c = conn.cursor()
+            
+            # Blacklisted wallets table
+            c.execute("""
+                CREATE TABLE IF NOT EXISTS blacklisted_wallets (
+                    address TEXT PRIMARY KEY,
+                    reason TEXT,
+                    evidence TEXT,
+                    detection_time INTEGER,
+                    confidence_score REAL,
+                    detection_method TEXT
+                )
+            """)
+            
+            # Notable wallets table (good performers)
+            c.execute("""
+                CREATE TABLE IF NOT EXISTS notable_wallets (
+                    address TEXT PRIMARY KEY,
+                    category TEXT,  -- 'trader', 'developer', 'insider'
+                    win_rate REAL,
+                    avg_roi REAL,
+                    total_successful_tokens INTEGER,
+                    last_updated INTEGER,
+                    notes TEXT
+                )
+            """)
+            
+            # Wallet performance history
+            c.execute("""
+                CREATE TABLE IF NOT EXISTS wallet_performance (
+                    address TEXT,
+                    token_address TEXT,
+                    entry_price REAL,
+                    exit_price REAL,
+                    profit_loss REAL,
+                    hold_duration INTEGER,
+                    timestamp INTEGER,
+                    PRIMARY KEY (address, token_address)
+                )
+            """)
+            
+            conn.commit()
+        finally:
+            conn.close()
+            
+    async def add_to_blacklist(self, address: str, reason: str, 
+                              evidence: str, confidence: float = 1.0) -> bool:
+        """Add wallet to blacklist with reason and evidence"""
+        try:
+            conn = sqlite3.connect(self.db_file)
+            c = conn.cursor()
+            
+            c.execute("""
+                INSERT OR REPLACE INTO blacklisted_wallets
+                (address, reason, evidence, detection_time, confidence_score, detection_method)
+                VALUES (?, ?, ?, ?, ?, ?)
+            """, (
+                address, 
+                reason, 
+                evidence,
+                int(time.time()),
+                confidence,
+                "automatic_detection"
+            ))
+            
+            conn.commit()
+            logging.info(f"Added {address} to blacklist: {reason}")
+            return True
+            
+        except Exception as e:
+            logging.error(f"Error adding to blacklist: {e}")
+            return False
+        finally:
+            conn.close()
+            
+    async def add_notable_wallet(self, address: str, category: str,
+                                win_rate: float, avg_roi: float,
+                                successful_tokens: int, notes: str = "") -> bool:
+        """Add or update notable wallet with performance metrics"""
+        try:
+            conn = sqlite3.connect(self.db_file)
+            c = conn.cursor()
+            
+            c.execute("""
+                INSERT OR REPLACE INTO notable_wallets
+                (address, category, win_rate, avg_roi, 
+                 total_successful_tokens, last_updated, notes)
+                VALUES (?, ?, ?, ?, ?, ?, ?)
+            """, (
+                address,
+                category,
+                win_rate,
+                avg_roi,
+                successful_tokens,
+                int(time.time()),
+                notes
+            ))
+            
+            conn.commit()
+            logging.info(f"Added/updated notable wallet {address}")
+            return True
+            
+        except Exception as e:
+            logging.error(f"Error adding notable wallet: {e}")
+            return False
+        finally:
+            conn.close()
+            
+    async def update_wallet_performance(self, address: str, 
+                                      token_address: str,
+                                      entry_price: float,
+                                      exit_price: float) -> None:
+        """Update wallet's performance record"""
+        try:
+            profit_loss = (exit_price - entry_price) / entry_price
+            
+            conn = sqlite3.connect(self.db_file)
+            c = conn.cursor()
+            
+            c.execute("""
+                INSERT OR REPLACE INTO wallet_performance
+                (address, token_address, entry_price, exit_price,
+                 profit_loss, hold_duration, timestamp)
+                VALUES (?, ?, ?, ?, ?, ?, ?)
+            """, (
+                address,
+                token_address,
+                entry_price,
+                exit_price,
+                profit_loss,
+                0,  # We'll calculate duration in a separate update
+                int(time.time())
+            ))
+            
+            conn.commit()
+            
+            # Update notable wallets if performance is exceptional
+            await self._check_for_notable_status(address, c)
+            
+        except Exception as e:
+            logging.error(f"Error updating wallet performance: {e}")
+        finally:
+            conn.close()
+            
+    async def is_blacklisted(self, address: str) -> Tuple[bool, str]:
+        """Check if wallet is blacklisted, returns (is_blacklisted, reason)"""
+        conn = sqlite3.connect(self.db_file)
+        try:
+            c = conn.cursor()
+            c.execute("SELECT reason FROM blacklisted_wallets WHERE address = ?", 
+                     (address,))
+            
+            result = c.fetchone()
+            return (bool(result), result[0] if result else "")
+            
+        finally:
+            conn.close()
+            
+    async def get_notable_wallets(self, category: str = None) -> List[Dict]:
+        """Get list of notable wallets with their metrics"""
+        conn = sqlite3.connect(self.db_file)
+        try:
+            c = conn.cursor()
+            
+            if category:
+                c.execute("""
+                    SELECT address, category, win_rate, avg_roi, 
+                           total_successful_tokens, notes
+                    FROM notable_wallets
+                    WHERE category = ?
+                    ORDER BY win_rate DESC, avg_roi DESC
+                """, (category,))
+            else:
+                c.execute("""
+                    SELECT address, category, win_rate, avg_roi,
+                           total_successful_tokens, notes
+                    FROM notable_wallets
+                    ORDER BY win_rate DESC, avg_roi DESC
+                """)
+                
+            return [{
+                'address': row[0],
+                'category': row[1],
+                'win_rate': row[2],
+                'avg_roi': row[3],
+                'successful_tokens': row[4],
+                'notes': row[5]
+            } for row in c.fetchall()]
+            
+        finally:
+            conn.close()
+            
+    async def _check_for_notable_status(self, address: str, 
+                                      cursor: sqlite3.Cursor) -> None:
+        """Check if wallet qualifies for notable status based on performance"""
+        # Get wallet's recent performance
+        cursor.execute("""
+            SELECT 
+                COUNT(*) as total_trades,
+                AVG(profit_loss) as avg_pl,
+                SUM(CASE WHEN profit_loss > 0 THEN 1 ELSE 0 END) as winning_trades
+            FROM wallet_performance
+            WHERE address = ?
+            AND timestamp >= ?
+        """, (address, int(time.time()) - (30 * 24 * 60 * 60)))  # Last 30 days
+        
+        row = cursor.fetchone()
+        if not row or row[0] < 10:  # Need at least 10 trades
+            return
+            
+        total_trades, avg_pl, winning_trades = row
+        win_rate = winning_trades / total_trades
+        
+        # If performance is exceptional, add to notable wallets
+        if win_rate > 0.7 and avg_pl > 0.5:  # 70% win rate and 50% avg profit
+            await self.add_notable_wallet(
+                address=address,
+                category='trader',
+                win_rate=win_rate,
+                avg_roi=avg_pl,
+                successful_tokens=winning_trades,
+                notes="Automatically added based on exceptional performance"
+            )
 
 def init_db():
     """Initialize SQLite database with required tables"""
