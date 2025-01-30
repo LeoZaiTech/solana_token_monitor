@@ -123,6 +123,7 @@ class TokenMonitorCascade:
 
     async def subscribe_to_program(self):
         """Subscribe to pump.fun program (from v10)"""
+        logging.info("Starting WebSocket subscription...")
         while True:
             try:
                 async with websockets.connect(self.ws_url) as websocket:
@@ -147,41 +148,77 @@ class TokenMonitorCascade:
                         ]
                     }
                     
+                    logging.debug(f"Sending subscription message: {json.dumps(subscribe_msg, indent=2)}")
                     await websocket.send(json.dumps(subscribe_msg))
                     logging.info(f"Subscribed to pump.fun program: {PUMP_FUN_PROGRAM_ID}")
+                    
+                    # Get subscription confirmation
+                    response = await websocket.recv()
+                    logging.debug(f"Subscription response: {response}")
                     
                     while True:
                         try:
                             response = await websocket.recv()
+                            logging.debug(f"Received WebSocket message: {response[:200]}...")  # First 200 chars
+                            
                             data = json.loads(response)
+                            if "method" in data:
+                                logging.debug(f"Message method: {data['method']}")
                             
                             if "params" in data and "result" in data["params"]:
                                 tx = data["params"]["result"]["value"]
+                                logging.debug(f"Processing transaction: {json.dumps(tx['transaction']['message']['accountKeys'][:3], indent=2)}")
+                                
                                 if self.is_token_creation(tx):
+                                    logging.info("Found token creation transaction!")
                                     await self.handle_new_token(tx)
+                                else:
+                                    logging.debug("Transaction is not a token creation")
                                     
                         except json.JSONDecodeError as e:
                             logging.error(f"Error decoding WebSocket message: {e}")
+                            logging.debug(f"Problematic message: {response[:200]}...")
                             continue
                             
             except Exception as e:
                 logging.error(f"WebSocket connection error: {e}")
+                logging.info("Attempting to reconnect in 5 seconds...")
                 await asyncio.sleep(5)
 
     def is_token_creation(self, tx: Dict) -> bool:
         """Check if transaction is a token creation (from v10)"""
         try:
+            logging.debug("Checking if transaction is token creation...")
+            
             # Check program ID
-            for account in tx["transaction"]["message"]["accountKeys"]:
+            account_keys = tx["transaction"]["message"]["accountKeys"]
+            logging.debug(f"Account keys in transaction: {json.dumps(account_keys[:3], indent=2)}")
+            
+            program_found = False
+            for account in account_keys:
                 if account["pubkey"] == PUMP_FUN_PROGRAM_ID:
-                    # Check instruction data
-                    if "meta" in tx and "innerInstructions" in tx["meta"]:
-                        for ix in tx["meta"]["innerInstructions"]:
-                            if "instructions" in ix:
-                                for instruction in ix["instructions"]:
-                                    if "data" in instruction and CREATE_INSTRUCTION_DISCRIMINATOR in instruction["data"]:
-                                        return True
+                    program_found = True
+                    logging.debug("Found pump.fun program ID in transaction")
+                    break
+            
+            if not program_found:
+                logging.debug("pump.fun program ID not found in transaction")
+                return False
+            
+            # Check instruction data
+            if "meta" in tx and "innerInstructions" in tx["meta"]:
+                for ix in tx["meta"]["innerInstructions"]:
+                    if "instructions" in ix:
+                        for instruction in ix["instructions"]:
+                            if "data" in instruction:
+                                logging.debug(f"Checking instruction data: {instruction['data'][:50]}...")
+                                if CREATE_INSTRUCTION_DISCRIMINATOR in instruction["data"]:
+                                    logging.info("Found create instruction discriminator!")
+                                    return True
+            
+            logging.debug("No create instruction found in transaction")
             return False
+            
         except Exception as e:
             logging.error(f"Error checking token creation: {e}")
             return False
@@ -325,8 +362,9 @@ class TokenMonitorCascade:
 
 async def main():
     """Main entry point"""
+    # Configure more detailed logging
     logging.basicConfig(
-        level=logging.INFO,
+        level=logging.DEBUG,  # Changed to DEBUG level
         format='%(asctime)s - %(levelname)s - %(message)s',
         handlers=[
             logging.StreamHandler(),

@@ -13,3 +13,99 @@
 2025-01-30 00:04:43,716 - ERROR - Error in monitoring loop: 'TokenMonitorCascade' object has no attribute 'update_existing_tokens'
 2025-01-30 00:14:16,055 - INFO - Starting Cascade Token Monitor...
 2025-01-30 00:14:16,385 - INFO - Subscribed to pump.fun program: 6EF8rrecthR5Dkzon8Nwu78hRvfCKubJ14M5uBEwF6P
+2025-01-30 00:23:37,848 - INFO - Starting Cascade Token Monitor...
+2025-01-30 00:23:37,850 - INFO - Starting WebSocket subscription...
+2025-01-30 00:23:37,966 - DEBUG - = connection is CONNECTING
+2025-01-30 00:23:38,008 - DEBUG - > GET /?api-key=8952a51d-a041-491a-9835-15408585276e HTTP/1.1
+2025-01-30 00:23:38,008 - DEBUG - > Host: mainnet.helius-rpc.com
+2025-01-30 00:23:38,008 - DEBUG - > Upgrade: websocket
+2025-01-30 00:23:38,009 - DEBUG - > Connection: Upgrade
+2025-01-30 00:23:38,009 - DEBUG - > Sec-WebSocket-Key: 0nfO4nyrCqdLVu4XyJokzA==
+2025-01-30 00:23:38,009 - DEBUG - > Sec-WebSocket-Version: 13
+2025-01-30 00:23:38,009 - DEBUG - > Sec-WebSocket-Extensions: permessage-deflate; client_max_window_bits
+2025-01-30 00:23:38,009 - DEBUG - > User-Agent: Python/3.13 websockets/11.0.3
+2025-01-30 00:23:38,372 - DEBUG - < HTTP/1.1 101 Switching Protocols
+2025-01-30 00:23:38,372 - DEBUG - < Date: Thu, 30 Jan 2025 05:23:38 GMT
+2025-01-30 00:23:38,372 - DEBUG - < Connection: upgrade
+2025-01-30 00:23:38,372 - DEBUG - < Upgrade: websocket
+2025-01-30 00:23:38,372 - DEBUG - < Sec-WebSocket-Accept: aM6/LwmX5qJmEnoZF6c/tukuO60=
+2025-01-30 00:23:38,372 - DEBUG - < CF-Ray: 909f07f2daa88831-ATL
+2025-01-30 00:23:38,372 - DEBUG - < CF-Cache-Status: DYNAMIC
+2025-01-30 00:23:38,373 - DEBUG - < x-via: ewr-genoa-32c-4
+2025-01-30 00:23:38,373 - DEBUG - < Server: cloudflare
+2025-01-30 00:23:38,373 - DEBUG - < alt-svc: h3=":443"; ma=86400
+2025-01-30 00:23:38,373 - DEBUG - = connection is OPEN
+2025-01-30 00:23:38,373 - DEBUG - Sending subscription message: {
+  "jsonrpc": "2.0",
+  "id": 1,
+  "method": "programSubscribe",
+  "params": [
+    "6EF8rrecthR5Dkzon8Nwu78hRvfCKubJ14M5uBEwF6P",
+    {
+      "encoding": "jsonParsed",
+      "commitment": "confirmed",
+      "filters": [
+        {
+          "memcmp": {
+            "offset": 0,
+            "bytes": "82a2124e4f31"
+          }
+        }
+      ]
+    }
+  ]
+}
+2025-01-30 00:23:38,373 - DEBUG - > TEXT '{"jsonrpc": "2.0", "id": 1, "method": "programS...": "82a2124e4f31"}}]}]}' [236 bytes]
+2025-01-30 00:23:38,374 - INFO - Subscribed to pump.fun program: 6EF8rrecthR5Dkzon8Nwu78hRvfCKubJ14M5uBEwF6P
+2025-01-30 00:23:38,477 - DEBUG - < TEXT '{"jsonrpc":"2.0","result":2031743,"id":1}' [41 bytes]
+2025-01-30 00:23:38,477 - DEBUG - Subscription response: {"jsonrpc":"2.0","result":2031743,"id":1}
+2025-01-30 00:23:58,376 - DEBUG - % sending keepalive ping
+2025-01-30 00:23:58,377 - DEBUG - > PING 6c bb cb 01 [binary, 4 bytes]
+2025-01-30 00:23:58,492 - DEBUG - < PONG 6c bb cb 01 [binary, 4 bytes]
+2025-01-30 00:23:58,493 - DEBUG - % received keepalive pong
+2025-01-30 00:24:10,174 - INFO - Starting Cascade Token Monitor...
+2025-01-30 00:24:10,175 - INFO - Starting WebSocket subscription...
+2025-01-30 00:24:10,208 - DEBUG - = connection is CONNECTING
+2025-01-30 00:24:10,251 - DEBUG - > GET /?api-key=8952a51d-a041-491a-9835-15408585276e HTTP/1.1
+2025-01-30 00:24:10,251 - DEBUG - > Host: mainnet.helius-rpc.com
+2025-01-30 00:24:10,251 - DEBUG - > Upgrade: websocket
+2025-01-30 00:24:10,251 - DEBUG - > Connection: Upgrade
+2025-01-30 00:24:10,251 - DEBUG - > Sec-WebSocket-Key: 31C+9tye2CQWuf9r0t2YzA==
+2025-01-30 00:24:10,251 - DEBUG - > Sec-WebSocket-Version: 13
+2025-01-30 00:24:10,251 - DEBUG - > Sec-WebSocket-Extensions: permessage-deflate; client_max_window_bits
+2025-01-30 00:24:10,251 - DEBUG - > User-Agent: Python/3.13 websockets/11.0.3
+2025-01-30 00:24:10,451 - DEBUG - < HTTP/1.1 101 Switching Protocols
+2025-01-30 00:24:10,451 - DEBUG - < Date: Thu, 30 Jan 2025 05:24:10 GMT
+2025-01-30 00:24:10,451 - DEBUG - < Connection: upgrade
+2025-01-30 00:24:10,451 - DEBUG - < Upgrade: websocket
+2025-01-30 00:24:10,451 - DEBUG - < Sec-WebSocket-Accept: wpXry/tW2NrkEQSzrdoG+qfMnQk=
+2025-01-30 00:24:10,451 - DEBUG - < CF-Ray: 909f08bc6e80ade1-ATL
+2025-01-30 00:24:10,451 - DEBUG - < CF-Cache-Status: DYNAMIC
+2025-01-30 00:24:10,451 - DEBUG - < x-via: ewr-genoa-24c-2
+2025-01-30 00:24:10,451 - DEBUG - < Server: cloudflare
+2025-01-30 00:24:10,451 - DEBUG - < alt-svc: h3=":443"; ma=86400
+2025-01-30 00:24:10,451 - DEBUG - = connection is OPEN
+2025-01-30 00:24:10,451 - DEBUG - Sending subscription message: {
+  "jsonrpc": "2.0",
+  "id": 1,
+  "method": "programSubscribe",
+  "params": [
+    "6EF8rrecthR5Dkzon8Nwu78hRvfCKubJ14M5uBEwF6P",
+    {
+      "encoding": "jsonParsed",
+      "commitment": "confirmed",
+      "filters": [
+        {
+          "memcmp": {
+            "offset": 0,
+            "bytes": "82a2124e4f31"
+          }
+        }
+      ]
+    }
+  ]
+}
+2025-01-30 00:24:10,451 - DEBUG - > TEXT '{"jsonrpc": "2.0", "id": 1, "method": "programS...": "82a2124e4f31"}}]}]}' [236 bytes]
+2025-01-30 00:24:10,452 - INFO - Subscribed to pump.fun program: 6EF8rrecthR5Dkzon8Nwu78hRvfCKubJ14M5uBEwF6P
+2025-01-30 00:24:10,537 - DEBUG - < TEXT '{"jsonrpc":"2.0","result":1931775,"id":1}' [41 bytes]
+2025-01-30 00:24:10,537 - DEBUG - Subscription response: {"jsonrpc":"2.0","result":1931775,"id":1}
