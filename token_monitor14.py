@@ -1677,17 +1677,92 @@ class TokenHeuristics:
             'failure_reasons': ["Could not analyze token"]
         }
 
-class PriceAlert:
-    def __init__(self, token_address: str, target_price: float, is_above: bool = True):
-        self.token_address = token_address
-        self.target_price = target_price
-        self.is_above = is_above  # True for price above target, False for below
-        self.triggered = False
+class MarketCapAnalyzer:
+    """Analyzes and tracks token market cap in real-time"""
+    
+    def __init__(self, helius_api_key: str):
+        self.helius_api_key = helius_api_key
+        self.api_url = f"https://mainnet.helius-rpc.com/?api-key={helius_api_key}"
+        self._cache = {}  # Cache market cap calculations
+        
+    async def get_market_cap(self, token_address: str) -> float:
+        """Calculate current market cap for a token"""
+        try:
+            # Get token metadata including decimals and supply
+            metadata = await self._get_token_metadata(token_address)
+            if not metadata:
+                return 0
+                
+            # Get current price from Jupiter/Orca
+            price = await self._get_token_price(token_address)
+            if price == 0:
+                return 0
+                
+            # Calculate market cap
+            decimals = metadata.get('decimals', 9)
+            supply = float(metadata.get('supply', 0)) / (10 ** decimals)
+            market_cap = supply * price
+            
+            # Cache the result
+            self._cache[token_address] = {
+                'market_cap': market_cap,
+                'timestamp': time.time()
+            }
+            
+            return market_cap
+            
+        except Exception as e:
+            logging.error(f"Error calculating market cap for {token_address}: {e}")
+            return 0
+            
+    async def _get_token_metadata(self, token_address: str) -> dict:
+        """Get token metadata from Helius API"""
+        try:
+            async with aiohttp.ClientSession() as session:
+                payload = {
+                    "jsonrpc": "2.0",
+                    "id": "my-id",
+                    "method": "getAsset",
+                    "params": {
+                        "id": token_address
+                    }
+                }
+                async with session.post(self.api_url, json=payload) as response:
+                    if response.status == 200:
+                        data = await response.json()
+                        return {
+                            'decimals': data['result'].get('token_info', {}).get('decimals', 9),
+                            'supply': data['result'].get('token_info', {}).get('supply', '0')
+                        }
+            return None
+        except Exception as e:
+            logging.error(f"Error fetching token metadata: {e}")
+            return None
+            
+    async def _get_token_price(self, token_address: str) -> float:
+        """Get token price from Jupiter API"""
+        try:
+            # Use Jupiter API to get price
+            jupiter_url = f"https://price.jup.ag/v4/price?ids={token_address}"
+            async with aiohttp.ClientSession() as session:
+                async with session.get(jupiter_url) as response:
+                    if response.status == 200:
+                        data = await response.json()
+                        return float(data.get('data', {}).get(token_address, {}).get('price', 0))
+            return 0
+        except Exception as e:
+            logging.error(f"Error fetching token price: {e}")
+            return 0
+            
+    def is_above_threshold(self, market_cap: float, threshold: float = 30000) -> bool:
+        """Check if market cap is above threshold"""
+        return market_cap >= threshold
 
 class TokenMonitor:
     def __init__(self, db_file: str):
         self.db_file = db_file
         self.price_alerts: Dict[str, List[PriceAlert]] = {}
+        self.market_cap_analyzer = MarketCapAnalyzer(HELIUS_API_KEY)
         self.init_db()
     
     def add_price_alert(self, token_address: str, target_price: float, is_above: bool = True):
@@ -1737,6 +1812,50 @@ class TokenMonitor:
         response = webhook.execute()
         if response.status_code != 204:
             logging.error(f"Error sending price alert: {response.text}")
+
+    async def monitor_market_cap(self, token_address: str):
+        """Monitor token's market cap and trigger analysis when it crosses 30k"""
+        try:
+            market_cap = await self.market_cap_analyzer.get_market_cap(token_address)
+            if self.market_cap_analyzer.is_above_threshold(market_cap):
+                logging.info(f"Token {token_address} reached 30k market cap threshold: ${market_cap:,.2f}")
+                
+                # Trigger comprehensive analysis
+                await self.analyze_token(token_address)
+                
+                # Send notification
+                await self.notify_discord({
+                    'token_address': token_address,
+                    'market_cap': market_cap,
+                    'event': 'market_cap_threshold',
+                    'timestamp': time.time()
+                })
+                
+        except Exception as e:
+            logging.error(f"Error monitoring market cap for {token_address}: {e}")
+            
+    async def analyze_token(self, token_address: str):
+        """Run comprehensive token analysis"""
+        # Get token data
+        token_data = await self.get_token_data(token_address)
+        if not token_data:
+            return
+            
+        # Run analysis components
+        deployer_score = await self.deployer_analyzer.analyze_deployer(token_data['deployer'])
+        holder_metrics = await self.holder_analyzer.analyze_token_metrics(token_address, token_data['deployer'])
+        volume_analysis = await self.volume_analyzer.analyze_volume(token_address, token_data['recent_trades'])
+        
+        # Calculate final score
+        score = await self.token_scorer.calculate_token_score(token_address, token_data)
+        
+        # Save results
+        await self.save_analysis_results(token_address, {
+            'deployer_score': deployer_score,
+            'holder_metrics': holder_metrics,
+            'volume_analysis': volume_analysis,
+            'final_score': score
+        })
 
 class WalletTracker:
     """Tracks and manages blacklisted and notable wallets"""
@@ -2485,9 +2604,7 @@ def notify_discord(tx_data):
         })
         
         response = webhook.execute()
-        if response.status_code == 204:
-            logging.info("Notification sent successfully.")
-        else:
+        if response.status_code != 204:
             logging.error(f"Error sending notification: {response.text}")
             
     except Exception as e:

@@ -46,6 +46,40 @@ class PriceAlert:
         self.is_above = is_above
         self.triggered = False
 
+class TokenMonitor:
+    def __init__(self, db_file: str):
+        self.db_file = db_file
+
+    async def monitor_market_cap(self, token_address: str):
+        """Monitor token's market cap"""
+        try:
+            # Fetch token data from Helius API
+            async with aiohttp.ClientSession() as session:
+                url = f"https://api.helius.xyz/v0/tokens?api-key={HELIUS_API_KEY}"
+                async with session.post(url, json={"mints": [token_address]}) as response:
+                    if response.status != 200:
+                        logging.error(f"Error fetching token data: {await response.text()}")
+                        return 0.0
+                    
+                    data = await response.json()
+                    if not data or not isinstance(data, list) or not data[0]:
+                        return 0.0
+                    
+                    token_data = data[0]
+                    
+                    # Calculate market cap based on supply and price
+                    supply = float(token_data.get("supply", 0))
+                    price_usd = float(token_data.get("priceUsd", 0))
+                    
+                    market_cap = supply * price_usd
+                    logging.debug(f"Calculated market cap for {token_address}: ${market_cap:,.2f}")
+                    
+                    return market_cap
+                    
+        except Exception as e:
+            logging.error(f"Error calculating market cap: {e}")
+            return 0.0
+
 class TokenMonitorCascade:
     """Unified token monitoring system combining best features from v4-10"""
     
@@ -56,6 +90,7 @@ class TokenMonitorCascade:
         self.known_snipers = set()
         self.known_insiders = set()
         self.blacklisted_deployers = set()
+        self.token_monitor = TokenMonitor(db_file)  # Add TokenMonitor instance
         self.init_db()
 
     def init_db(self):
@@ -227,93 +262,40 @@ class TokenMonitorCascade:
                 logging.info("Attempting to reconnect in 5 seconds...")
                 await asyncio.sleep(5)
 
-    async def handle_new_token(self, token_data: Dict):
-        """Process new token creation with enhanced validation"""
+    async def handle_new_token(self, token_data: dict):
+        """Handle new token creation event"""
         try:
-            token_address = token_data["address"]
-            logging.info(f"Processing potential new token: {token_address}")
+            token_address = token_data.get('address')
+            if not token_address:
+                return
+                
+            logging.info(f"New token detected: {token_address}")
             
-            # Validate token using Helius API
-            async with aiohttp.ClientSession() as session:
-                url = f"https://api.helius.xyz/v0/token-metadata?api-key={HELIUS_API_KEY}"
-                async with session.post(url, json={"mintAccounts": [token_address]}) as response:
-                    if response.status != 200:
-                        logging.error(f"Error validating token: {await response.text()}")
-                        return
-                        
-                    data = await response.json()
-                    if not data or not isinstance(data, list) or not data[0]:
-                        logging.warning(f"Invalid token data for {token_address}")
-                        return
-                    
-                    token_info = data[0]
-                    
-                    # Extract token metadata
-                    token_name = token_info.get("onChainMetadata", {}).get("metadata", {}).get("data", {}).get("name", "Unknown")
-                    token_symbol = token_info.get("onChainMetadata", {}).get("metadata", {}).get("data", {}).get("symbol", "")
-                    decimals = token_info.get("mint", {}).get("decimals", 0)
-                    supply = token_info.get("mint", {}).get("supply", "0")
-                    
-                    # Get deployer information
-                    deployer = token_info.get("mint", {}).get("freezeAuthority", "")
-                    if not deployer:
-                        deployer = token_info.get("mint", {}).get("mintAuthority", "")
-                    
-                    # Save to database with enhanced information
-                    conn = sqlite3.connect(self.db_file)
-                    c = conn.cursor()
-                    
-                    # First check if token already exists
-                    c.execute('SELECT address FROM tokens WHERE address = ?', (token_address,))
-                    if c.fetchone() is None:
-                        c.execute('''
-                            INSERT INTO tokens 
-                            (address, deployer_address, creation_time, last_updated, name, symbol, decimals, total_supply) 
-                            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-                        ''', (
-                            token_address,
-                            deployer,
-                            int(time.time()),
-                            int(time.time()),
-                            token_name,
-                            token_symbol,
-                            decimals,
-                            supply
-                        ))
-                        
-                        # Update deployer stats
-                        if deployer:
-                            c.execute('''
-                                INSERT OR REPLACE INTO deployer_stats 
-                                (address, total_tokens, last_token_time) 
-                                VALUES (
-                                    ?,
-                                    COALESCE((SELECT total_tokens + 1 FROM deployer_stats WHERE address = ?), 1),
-                                    ?
-                                )
-                            ''', (deployer, deployer, int(time.time())))
-                        
-                        conn.commit()
-                        
-                        # Send notification for new token
-                        await self.send_notification(
-                            f"🆕 New Token Detected!\n" +
-                            f"Name: {token_name}\n" +
-                            f"Symbol: {token_symbol}\n" +
-                            f"Address: {token_address}\n" +
-                            f"Deployer: {deployer}\n" +
-                            f"Supply: {float(supply):,.0f}"
-                        )
-                        
-                        logging.info(f"Started monitoring new token: {token_name} ({token_address})")
-                        
-                        # Start monitoring this token
-                        asyncio.create_task(self.monitor_token(token_address))
-                    
-                    conn.close()
+            # Start market cap monitoring
+            asyncio.create_task(self._monitor_token_market_cap(token_address))
             
         except Exception as e:
             logging.error(f"Error handling new token: {e}")
+
+    async def _monitor_token_market_cap(self, token_address: str):
+        """Monitor token's market cap with exponential backoff"""
+        backoff = 1
+        max_backoff = 300  # 5 minutes
+        max_attempts = 100  # Stop after ~8 hours if token never reaches threshold
+        
+        for attempt in range(max_attempts):
+            try:
+                # Monitor market cap
+                await self.token_monitor.monitor_market_cap(token_address)
+                
+                # Sleep with exponential backoff
+                await asyncio.sleep(backoff)
+                backoff = min(backoff * 2, max_backoff)
+                
+            except Exception as e:
+                logging.error(f"Error monitoring market cap: {e}")
+                await asyncio.sleep(backoff)
+                backoff = min(backoff * 2, max_backoff)
 
     async def monitor_token(self, token_address: str):
         """Monitor individual token (from v8)"""
