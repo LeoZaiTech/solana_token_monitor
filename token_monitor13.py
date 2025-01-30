@@ -481,6 +481,25 @@ class DeployerAnalyzer:
         stats = await self.analyze_deployer(deployer_address)
         return stats.is_blacklisted
 
+class TwitterAnalyzer:
+    """Analyzes Twitter data for token monitoring using Twitter API v2"""
+    def __init__(self):
+        self.bearer_token = os.getenv("TWITTER_BEARER_TOKEN")
+        self.api_base_url = "https://api.twitter.com/2"
+        if not self.bearer_token:
+            logging.warning("TWITTER_BEARER_TOKEN not set. Twitter analysis will be disabled.")
+        self.session = None
+
+    async def analyze_token(self, token_address: str) -> Optional[Dict]:
+        """Analyze Twitter presence for a token"""
+        if not self.bearer_token:
+            return None
+        return {'sentiment_score': 0.5}  # Placeholder for now
+
+    def calculate_risk_score(self, metrics: Dict) -> float:
+        """Calculate risk score from Twitter metrics"""
+        return 0.5  # Neutral score for now
+
 class TokenScorer:
     def __init__(self, db_file: str):
         self.db_file = db_file
