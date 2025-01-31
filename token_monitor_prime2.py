@@ -1,4 +1,5 @@
 import os
+import sys
 import sqlite3
 import json
 import requests
@@ -2157,8 +2158,17 @@ async def get_token_price(token_address):
     # You would typically:
     # 1. Query Jupiter/Raydium/Other DEX API for pool info
     # 2. Calculate price from pool reserves
-    # For now, returning mock price for testing
-    return 0.1
+    try:
+        url = "https://price.jup.ag/v4/price"
+        params = {"ids": token_address}
+        response = requests.get(url, params=params)
+        if response.status_code == 200:
+            data = response.json()
+            return float(data.get('data', {}).get(token_address, {}).get('price', 0))
+        return 0.0
+    except Exception as e:
+        logging.error(f"Error getting token price: {e}")
+        return 0.0
 
 async def get_transaction_details(signature):
     """Get detailed transaction information"""
@@ -2312,12 +2322,11 @@ class WebSocketMonitor:
                 if parsed_data:
                     save_transaction_to_db(parsed_data)
                     
-                    # Send notification immediately for testing
+                    # Send notification for new token
                     notify_discord(parsed_data)
-                    logging.info("Test notification sent.")
 
                     deployer_address = parsed_data[8]
-                    token_address = 'TestToken123'  # In real implementation, extract from tx_data
+                    token_address = value.get('pubkey') if value else None  # Extract token address from account data
 
                     # Calculate and log token score
                     scorer = TokenScorer(DB_FILE)
@@ -2340,22 +2349,70 @@ class WebSocketMonitor:
 def main():
     init_db()
     
-    sample_signature = "4JWQMMs63xBM3dGKUF29YZnyp6LMEJJGCACo6YBiU2toTqiUDPP79i35Ynct8f6ppCtnRGG7FM7DxomzmYCtuy6F"
-
-    logging.info(f"Fetching transaction: {sample_signature}")
-    tx_data = fetch_transaction(sample_signature)
+    if len(sys.argv) < 2:
+        print("Please provide a token address")
+        sys.exit(1)
+    
+    token_address = sys.argv[1]
+    
+    # Get transactions for the token using Helius RPC
+    url = "https://mainnet.helius-rpc.com/"
+    headers = {"Content-Type": "application/json"}
+    payload = {
+        "jsonrpc": "2.0",
+        "id": "my-id",
+        "method": "getTokenLargestAccounts",
+        "params": [token_address]
+    }
+    
+    try:
+        response = requests.post(url + "?api-key=" + HELIUS_API_KEY, json=payload, headers=headers)
+        if response.status_code == 200:
+            data = response.json()
+            if data.get('result') and data['result'].get('value'):
+                # Get latest transaction for the largest account
+                largest_account = data['result']['value'][0]['address']
+                
+                tx_payload = {
+                    "jsonrpc": "2.0",
+                    "id": "my-id",
+                    "method": "getSignaturesForAddress",
+                    "params": [largest_account, {"limit": 1}]
+                }
+                
+                tx_response = requests.post(url + "?api-key=" + HELIUS_API_KEY, json=tx_payload, headers=headers)
+                if tx_response.status_code == 200:
+                    tx_data = tx_response.json()
+                    if tx_data.get('result') and len(tx_data['result']) > 0:
+                        signature = tx_data['result'][0]['signature']
+                        logging.info(f"Found transaction: {signature}")
+                        tx_data = fetch_transaction(signature)
+                    else:
+                        logging.error("No transactions found for token's largest account")
+                        return
+                else:
+                    logging.error("Failed to fetch transaction signatures")
+                    return
+            else:
+                logging.error("No accounts found for token")
+                return
+        else:
+            logging.error("Failed to fetch token accounts")
+            return
+    except Exception as e:
+        logging.error(f"Error fetching token data: {e}")
+        return
 
     if tx_data:
         parsed_data = parse_transaction_data(tx_data)
         if parsed_data:
             save_transaction_to_db(parsed_data)
             
-            # Send notification immediately for testing
+            # Send notification for token transaction
             notify_discord(parsed_data)
-            logging.info("Test notification sent.")
 
             deployer_address = parsed_data[8]
-            token_address = 'TestToken123'  # In real implementation, extract from tx_data
+            token_address = tx_data["transaction"]["message"]["accountKeys"][0]["pubkey"]  # Use first account as token
 
             # Calculate and log token score
             scorer = TokenScorer(DB_FILE)
