@@ -4,6 +4,9 @@ import sqlite3
 import json
 import requests
 import time
+import threading
+import itertools
+import time
 import logging
 from datetime import datetime
 from datetime import timezone
@@ -2346,6 +2349,32 @@ class WebSocketMonitor:
         except Exception as e:
             logging.error(f"Error handling new token: {e}")
 
+class Spinner:
+    def __init__(self, message="Processing"):
+        self.spinner = itertools.cycle(['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏'])
+        self.message = message
+        self.running = False
+        self.spinner_thread = None
+
+    def spin(self):
+        while self.running:
+            sys.stdout.write(f'\r{next(self.spinner)} {self.message} ')
+            sys.stdout.flush()
+            time.sleep(0.1)
+        sys.stdout.write('\r✓ Done!\n')
+        sys.stdout.flush()
+
+    def __enter__(self):
+        self.running = True
+        self.spinner_thread = threading.Thread(target=self.spin)
+        self.spinner_thread.start()
+        return self
+
+    def __exit__(self, exc_type, exc_val, exc_tb):
+        self.running = False
+        if self.spinner_thread:
+            self.spinner_thread.join()
+
 def main():
     init_db()
     
@@ -2354,6 +2383,7 @@ def main():
         sys.exit(1)
     
     token_address = sys.argv[1]
+    print(f"\nMonitoring token: {token_address}\n")
     
     # Get transactions for the token using Helius RPC
     url = "https://mainnet.helius-rpc.com/"
@@ -2366,7 +2396,8 @@ def main():
     }
     
     try:
-        response = requests.post(url + "?api-key=" + HELIUS_API_KEY, json=payload, headers=headers)
+        with Spinner("Fetching token data..."):
+            response = requests.post(url + "?api-key=" + HELIUS_API_KEY, json=payload, headers=headers)
         if response.status_code == 200:
             data = response.json()
             if data.get('result') and data['result'].get('value'):
@@ -2380,13 +2411,15 @@ def main():
                     "params": [largest_account, {"limit": 1}]
                 }
                 
-                tx_response = requests.post(url + "?api-key=" + HELIUS_API_KEY, json=tx_payload, headers=headers)
+                with Spinner("Fetching transaction signatures..."):
+                    tx_response = requests.post(url + "?api-key=" + HELIUS_API_KEY, json=tx_payload, headers=headers)
                 if tx_response.status_code == 200:
                     tx_data = tx_response.json()
                     if tx_data.get('result') and len(tx_data['result']) > 0:
                         signature = tx_data['result'][0]['signature']
                         logging.info(f"Found transaction: {signature}")
-                        tx_data = fetch_transaction(signature)
+                        with Spinner("Fetching transaction details..."):
+                            tx_data = fetch_transaction(signature)
                     else:
                         logging.error("No transactions found for token's largest account")
                         return
@@ -2417,16 +2450,18 @@ def main():
             # Calculate and log token score
             scorer = TokenScorer(DB_FILE)
             try:
-                score = asyncio.run(scorer.calculate_token_score(token_address, parsed_data))
-                logging.info(f"Token confidence score: {score:.2f}/100")
+                with Spinner("Calculating token score..."):
+                    score = asyncio.run(scorer.calculate_token_score(token_address, parsed_data))
+                    logging.info(f"Token confidence score: {score:.2f}/100")
                     
             except Exception as e:
                 logging.error(f"Error calculating token score: {e}")
 
             # Analyze the deployer history
             try:
-                result = asyncio.run(analyze_deployer_history(deployer_address))
-                logging.info(f"Deployer history analysis: {result}")
+                with Spinner("Analyzing deployer history..."):
+                    result = asyncio.run(analyze_deployer_history(deployer_address))
+                    logging.info(f"Deployer history analysis: {result}")
             except Exception as e:
                 logging.error(f"Error analyzing deployer history: {e}")
         else:
