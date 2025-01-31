@@ -33,25 +33,23 @@ CREATE_INSTRUCTION_DISCRIMINATOR = "82a2124e4f31"
 @dataclass
 class TokenMetrics:
     """Class to store token metrics for analysis"""
-    address: str
-    total_holders: int
-    dev_sells: int
-    sniper_buys: int
-    insider_buys: int
-    buy_count: int
-    sell_count: int
-    large_holders: int  # Holders with >8% supply
-    total_supply: float
-    holder_balances: Dict[str, float]  # address -> balance
-
-@dataclass
-class TokenMetrics:
-    sniper_buys: int = 0
-    insider_buys: int = 0
-    buy_count: int = 0
-    sell_count: int = 0
-    large_holders: int = 0
-    dev_sells: int = 0
+    def __init__(self):
+        self.address = ""
+        self.total_holders = 0
+        self.dev_sells = 0
+        self.sniper_buys = 0
+        self.insider_buys = 0
+        self.buy_count = 0
+        self.sell_count = 0
+        self.large_holders = 0
+        self.total_supply = 0.0
+        self.holder_balances = {}
+        self.sniper_buys = 0
+        self.insider_buys = 0
+        self.buy_count = 0
+        self.sell_count = 0
+        self.large_holders = 0
+        self.dev_sells = 0
 
 class HolderAnalyzer:
     def __init__(self, db_file: str):
@@ -154,18 +152,8 @@ class HolderAnalyzer:
             holder_data = await self._fetch_holder_data(token_address)
             
             # Initialize metrics
-            metrics = TokenMetrics(
-                address=token_address,
-                total_holders=0,
-                dev_sells=0,
-                sniper_buys=0,
-                insider_buys=0,
-                buy_count=0,
-                sell_count=0,
-                large_holders=0,
-                total_supply=0,
-                holder_balances={}
-            )
+            metrics = TokenMetrics()
+            metrics.address = token_address
             
             # Process holder data
             await self._process_holder_data(holder_data, metrics, deployer_address)
@@ -914,6 +902,7 @@ class TokenScorer:
         self.db_file = db_file
         self.deployer_analyzer = DeployerAnalyzer(db_file)
         self.holder_analyzer = HolderAnalyzer(db_file)
+        self.safety_checker = TokenSafetyChecker(db_file)  # Add safety checker
         self.twitter_analyzer = TwitterAnalyzer()  # Add Twitter analyzer
 
     async def calculate_token_score(self, token_address: str, tx_data: tuple) -> float:
@@ -923,7 +912,7 @@ class TokenScorer:
                 'deployer_score': await self._get_deployer_score(tx_data[8]),  # 25%
                 'holder_score': self._get_holder_score(tx_data),  # 20%
                 'transaction_score': self._get_transaction_score(tx_data),  # 20%
-                'sniper_score': self._get_sniper_score(tx_data),  # 15%
+                'sniper_score': await self._get_sniper_score(tx_data),  # 15%
                 'market_cap_score': await self._get_market_cap_score(token_address),  # 10%
                 'twitter_score': await self._get_twitter_score(token_address)  # 10%
             }
@@ -1022,7 +1011,7 @@ class TokenScorer:
             logging.error(f"Error in transaction score calculation: {e}")
             return 0.0
 
-    def _get_sniper_score(self, tx_data: tuple) -> float:
+    async def _get_sniper_score(self, tx_data: tuple) -> float:
         """Calculate score based on sniper and insider presence using detailed metrics"""
         try:
             # Safely parse integer values with error handling
@@ -1038,21 +1027,20 @@ class TokenScorer:
             insider_count = safe_int(tx_data[11])
             
             # Get detailed safety metrics
-            metrics = TokenMetrics(
-                address=str(tx_data[0]),
-                total_holders=safe_int(tx_data[3]),
-                total_supply=float(safe_int(tx_data[4], 1)),
-                holder_balances={},
-                dev_sells=safe_int(tx_data[9]),
-                sniper_buys=sniper_count,
-                insider_buys=insider_count,
-                buy_count=safe_int(tx_data[5]),
-                sell_count=safe_int(tx_data[6]),
-                large_holders=safe_int(tx_data[7])
-            )
+            metrics = TokenMetrics()
+            metrics.address = str(tx_data[0])
+            metrics.total_holders = safe_int(tx_data[3])
+            metrics.total_supply = float(safe_int(tx_data[4], 1))
+            metrics.holder_balances = {}
+            metrics.dev_sells = safe_int(tx_data[9])
+            metrics.sniper_buys = sniper_count
+            metrics.insider_buys = insider_count
+            metrics.buy_count = safe_int(tx_data[5])
+            metrics.sell_count = safe_int(tx_data[6])
+            metrics.large_holders = safe_int(tx_data[7])
             
             # Use enhanced safety check
-            _, safety_scores, _ = self.holder_analyzer.is_token_safe(metrics)
+            _, safety_scores, _ = self.safety_checker.check_token_safety(metrics.address, metrics)
             
             # Calculate weighted safety score
             weights = {
