@@ -1012,7 +1012,7 @@ class TokenScorer:
             return 0.0
 
     async def _get_sniper_score(self, tx_data: tuple) -> float:
-        """Calculate score based on sniper and insider presence using detailed metrics"""
+        """Calculate score based on sniper and insider presence using basic metrics"""
         try:
             # Safely parse integer values with error handling
             def safe_int(val, default=0):
@@ -1023,40 +1023,25 @@ class TokenScorer:
                 except (ValueError, TypeError):
                     return default
 
+            # Get basic metrics we need
             sniper_count = safe_int(tx_data[10])
             insider_count = safe_int(tx_data[11])
+            large_holders = safe_int(tx_data[7])
             
-            # Get detailed safety metrics
-            metrics = TokenMetrics()
-            metrics.address = str(tx_data[0])
-            metrics.total_holders = safe_int(tx_data[3])
-            metrics.total_supply = float(safe_int(tx_data[4], 1))
-            metrics.holder_balances = {}
-            metrics.dev_sells = safe_int(tx_data[9])
-            metrics.sniper_buys = sniper_count
-            metrics.insider_buys = insider_count
-            metrics.buy_count = safe_int(tx_data[5])
-            metrics.sell_count = safe_int(tx_data[6])
-            metrics.large_holders = safe_int(tx_data[7])
-            
-            # Use enhanced safety check
-            _, safety_scores, _ = self.safety_checker.check_token_safety(metrics.address, metrics)
-            
-            # Calculate weighted safety score
-            weights = {
-                'sniper': 0.35,
-                'insider': 0.25,
-                'trading': 0.20,
-                'holder': 0.10,
-                'developer': 0.10
-            }
-            
-            final_score = sum(safety_scores[key] * weights[key] for key in weights)
-            return float(final_score)
+            # Simple scoring based on direct metrics
+            score = 1.0
+            if sniper_count > 0:
+                score -= 0.35
+            if insider_count > 0:
+                score -= 0.25
+            if large_holders < 3:
+                score -= 0.20
+                
+            return max(0.0, score)
             
         except Exception as e:
-            logging.error(f"Error in sniper score calculation: {e}")
-            return 0.0
+            logging.error(f"Error in sniper score calculation: {str(e)}")
+            return 0.5  # Return neutral score on error
 
     async def _get_market_cap_score(self, token_address: str) -> float:
         """Calculate score based on market cap growth and stability"""
