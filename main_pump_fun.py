@@ -23,6 +23,16 @@ DB_FILE = "solana_transactions.db"
 PUMP_FUN_PROGRAM_ID = "6EF8rrecthR5Dkzon8Nwu78hRvfCKubJ14M5uBEwF6P"
 CREATE_INSTRUCTION_DISCRIMINATOR = "82a2124e4f31"
 
+# Configure logging
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(levelname)s - %(message)s',
+    handlers=[
+        logging.StreamHandler(),
+        logging.FileHandler('pump_fun_monitor.log')
+    ]
+)
+
 @dataclass
 class TokenMetrics:
     """Token metrics for analysis"""
@@ -149,26 +159,75 @@ class TokenMonitorCascade:
 
     async def start_monitoring(self):
         """Main monitoring loop combining WebSocket and analysis"""
-        logging.info("Starting Cascade Token Monitor...")
+        print("\n🚀 Starting Cascade Token Monitor...\n")
         
-        # Start WebSocket subscription (v10)
-        ws_task = asyncio.create_task(self.subscribe_to_program())
+        # Verify configuration
+        if not HELIUS_API_KEY:
+            print("❌ ERROR: HELIUS_API_KEY not set!")
+            return
+        if not DISCORD_WEBHOOK_URL:
+            print("⚠️ WARNING: DISCORD_WEBHOOK_URL not set! Notifications disabled.")
         
-        # Start periodic checks (v8)
-        while True:
-            try:
-                await self.update_existing_tokens()
-                await asyncio.sleep(30)
-            except Exception as e:
-                logging.error(f"Error in monitoring loop: {e}")
-                await asyncio.sleep(60)
+        print("📊 Features enabled:")
+        print("  ✓ Real-time pump.fun monitoring")
+        print("  ✓ Automatic token detection")
+        print("  ✓ Market cap tracking")
+        print("  ✓ Holder analysis")
+        print("  ✓ Deployer history")
+        print("  ✓ Sniper/Insider detection")
+        print("  ✓ Discord notifications")
+        
+        print("\n🔧 Configuration:")
+        print(f"  • WebSocket: wss://mainnet.helius-rpc.com/?api-key=****{HELIUS_API_KEY[-4:]}")
+        print(f"  • Program ID: {PUMP_FUN_PROGRAM_ID}")
+        print(f"  • Database: {self.db_file}")
+        
+        print("\n🔍 Starting monitoring...")
+        
+        try:
+            # Start WebSocket subscription
+            ws_task = asyncio.create_task(self.subscribe_to_program())
+            
+            # Start periodic background updates
+            token_count = 0
+            while True:
+                try:
+                    # Update existing tokens
+                    updated = await self.update_existing_tokens()
+                    token_count += len(updated) if updated else 0
+                    
+                    # Show stats
+                    print(f"\r📈 Stats: {token_count} tokens monitored | " 
+                          f"WebSocket: Active | " 
+                          f"Last update: {datetime.now().strftime('%H:%M:%S')}", end='')
+                    
+                    await asyncio.sleep(30)
+                except Exception as e:
+                    logging.error(f"Error in monitoring loop: {e}")
+                    await asyncio.sleep(60)
+                    
+        except Exception as e:
+            print(f"\n❌ Fatal error: {e}")
+        finally:
+            if ws_task:
+                ws_task.cancel()
 
     async def subscribe_to_program(self):
         """Subscribe to pump.fun program (from v10)"""
-        logging.info("Starting WebSocket subscription...")
+        print("\n🔌 Starting WebSocket subscription...")
+        
+        # Verify Discord webhook
+        if not DISCORD_WEBHOOK_URL:
+            print("⚠️ WARNING: Discord webhook URL not set! Notifications will not work!")
+        else:
+            print("✅ Discord webhook configured")
+            
         while True:
             try:
+                print("🔄 Connecting to Helius WebSocket...")
                 async with websockets.connect(self.ws_url) as websocket:
+                    print("✅ WebSocket connected successfully")
+                    
                     # First subscribe without filters to see all program transactions
                     subscribe_msg = {
                         "jsonrpc": "2.0",
@@ -182,6 +241,8 @@ class TokenMonitorCascade:
                             }
                         ]
                     }
+                    
+                    print(f"📡 Subscribing to pump.fun program: {PUMP_FUN_PROGRAM_ID}")
                     
                     logging.debug(f"Sending subscription message: {json.dumps(subscribe_msg, indent=2)}")
                     await websocket.send(json.dumps(subscribe_msg))
