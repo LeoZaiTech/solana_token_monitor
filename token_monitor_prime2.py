@@ -393,33 +393,33 @@ class DeployerAnalyzer:
             
             # Get comprehensive token performance metrics
             c.execute('''
-                WITH TokenPerformance AS (
-                    SELECT t.token_address,
-                           t.market_cap as current_mcap,
-                           t.creation_time,
-                           tmh.peak_mcap,
-                           tmh.peak_time,
-                           (julianday(datetime(tmh.peak_time, 'unixepoch')) - 
-                            julianday(datetime(t.creation_time, 'unixepoch'))) as days_to_peak,
+                WITH PeakMarketCaps AS (
+                    SELECT token_address,
+                           MAX(market_cap) as peak_mcap,
+                           MAX(timestamp) as peak_time
+                    FROM token_market_cap_history
+                    GROUP BY token_address
+                ),
+                TokenPerformance AS (
+                    SELECT t.address as token_address,
+                           t.current_market_cap as current_mcap,
+                           t.launch_time as creation_time,
+                           p.peak_mcap,
+                           p.peak_time,
+                           (julianday(datetime(p.peak_time, 'unixepoch')) - 
+                            julianday(datetime(t.launch_time, 'unixepoch'))) as days_to_peak,
                            CASE 
-                               WHEN t.market_cap >= 200000 THEN
+                               WHEN t.current_market_cap >= 200000 THEN
                                    (julianday(datetime(t.last_updated, 'unixepoch')) - 
-                                    julianday(datetime(t.creation_time, 'unixepoch')))
+                                    julianday(datetime(t.launch_time, 'unixepoch')))
                                ELSE NULL
                            END as days_above_200k,
-                           CASE WHEN tmh.peak_mcap > 0 
-                                THEN (tmh.peak_mcap - t.market_cap) / tmh.peak_mcap 
+                           CASE WHEN p.peak_mcap > 0 
+                                THEN (p.peak_mcap - t.current_market_cap) / p.peak_mcap 
                                 ELSE 0 
                            END as drawdown
                     FROM tokens t
-                    LEFT JOIN (
-                        SELECT token_address, 
-                               MAX(market_cap) as peak_mcap,
-                               MAX(CASE WHEN market_cap = MAX(market_cap) OVER (PARTITION BY token_address) 
-                                   THEN timestamp END) as peak_time
-                        FROM token_market_cap_history
-                        GROUP BY token_address
-                    ) tmh ON t.token_address = tmh.token_address
+                    LEFT JOIN PeakMarketCaps p ON t.address = p.token_address
                     WHERE t.deployer_address = ?
                 )
                 SELECT 
