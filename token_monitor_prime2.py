@@ -2015,16 +2015,36 @@ def analyze_holders(token_transfers):
     sniper_wallets = set(os.getenv("SNIPER_WALLETS", "").split(","))
     insider_wallets = set(os.getenv("INSIDER_WALLETS", "").split(","))
 
-    holder_count = len(set(tx["destination"] for tx in token_transfers))
-    sniper_count = sum(1 for tx in token_transfers if tx["destination"] in sniper_wallets)
-    insider_count = sum(1 for tx in token_transfers if tx["destination"] in insider_wallets)
+    valid_transfers = []
+    for tx in token_transfers:
+        if not tx.get("destination") or not tx.get("amount"):
+            continue
+        try:
+            amount = int(tx["amount"])
+            if amount > 0:
+                valid_transfers.append((tx["destination"], amount))
+        except (ValueError, TypeError):
+            continue
+
+    if not valid_transfers:
+        return 0, 0, 0, 0
+
+    # Calculate holder metrics
+    holders = set(tx[0] for tx in valid_transfers)
+    holder_count = len(holders)
+    sniper_count = sum(1 for dest, _ in valid_transfers if dest in sniper_wallets)
+    insider_count = sum(1 for dest, _ in valid_transfers if dest in insider_wallets)
 
     # Check for high holder concentration
     high_holders = {}
-    for tx in token_transfers:
-        high_holders[tx["destination"]] = high_holders.get(tx["destination"], 0) + int(tx["amount"])
+    for dest, amount in valid_transfers:
+        high_holders[dest] = high_holders.get(dest, 0) + amount
 
-    high_holder_count = sum(1 for amount in high_holders.values() if amount > 0.08 * sum(high_holders.values()))
+    total_supply = sum(high_holders.values())
+    if total_supply == 0:
+        return holder_count, sniper_count, insider_count, 0
+
+    high_holder_count = sum(1 for amount in high_holders.values() if amount > 0.08 * total_supply)
 
     return holder_count, sniper_count, insider_count, high_holder_count
 
@@ -2393,12 +2413,153 @@ class Spinner:
         if self.spinner_thread:
             self.spinner_thread.join()
 
+async def scan_for_promising_tokens(min_confidence=70):
+    """Scan recent token transactions for high confidence opportunities"""
+    url = "https://mainnet.helius-rpc.com/"
+    headers = {"Content-Type": "application/json"}
+    
+    # Get recent token program transactions
+    tx_payload = {
+        "jsonrpc": "2.0",
+        "id": "my-id",
+        "method": "getSignaturesForAddress",
+        "params": ["TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA", {"limit": 10}]  # Start with fewer transactions for testing
+    }
+    
+    promising_tokens = []
+    processed_tokens = set()
+    
+    try:
+        # Get recent token program transactions
+        logging.info("Fetching recent token transactions...")
+        tx_response = requests.post(url + "?api-key=" + HELIUS_API_KEY, json=tx_payload, headers=headers)
+        
+        if tx_response.status_code != 200:
+            logging.error(f"Failed to fetch recent transactions: {tx_response.text}")
+            return
+        
+        tx_data = tx_response.json()
+        if not tx_data.get('result'):
+            logging.error("No recent transactions found")
+            return
+        
+        # Process each transaction
+        for i, tx in enumerate(tx_data['result'], 1):
+            try:
+                signature = tx['signature']
+                logging.info(f"Processing transaction {i}/{len(tx_data['result'])}: {signature[:8]}...")
+                
+                # Fetch transaction details
+                tx_details = fetch_transaction(signature)
+                if not tx_details:
+                    logging.warning(f"Could not fetch details for transaction {signature[:8]}")
+                    continue
+                
+                # Basic validation of transaction structure
+                if not tx_details.get("transaction", {}).get("message", {}).get("accountKeys"):
+                    logging.warning(f"Invalid transaction structure for {signature[:8]}")
+                    continue
+                
+                # Get token address
+                try:
+                    token_address = tx_details["transaction"]["message"]["accountKeys"][0]["pubkey"]
+                except (KeyError, IndexError) as e:
+                    logging.warning(f"Could not extract token address from {signature[:8]}: {e}")
+                    continue
+                
+                if token_address in processed_tokens:
+                    logging.info(f"Already processed token {token_address[:8]}")
+                    continue
+                
+                processed_tokens.add(token_address)
+                
+                # Parse transaction data
+                parsed_data = parse_transaction_data(tx_details)
+                if not parsed_data:
+                    logging.warning(f"Could not parse data for {signature[:8]}")
+                    continue
+                
+                # Calculate token score
+                try:
+                    scorer = TokenScorer(DB_FILE)
+                    score = await scorer.calculate_token_score(token_address, parsed_data)
+                    logging.info(f"Token {token_address[:8]} score: {score}")
+                except Exception as e:
+                    logging.error(f"Error calculating score for {token_address[:8]}: {e}")
+                    continue
+                
+                # Check market cap
+                try:
+                    market_cap = await check_market_cap(token_address)
+                    if not market_cap or market_cap < 200000:
+                        logging.info(f"Token {token_address[:8]} market cap too low: ${market_cap:,.2f}")
+                        continue
+                    logging.info(f"Token {token_address[:8]} market cap: ${market_cap:,.2f}")
+                except Exception as e:
+                    logging.error(f"Error checking market cap for {token_address[:8]}: {e}")
+                    continue
+                
+                if score >= min_confidence:
+                    logging.info(f"Found promising token: {token_address[:8]} (Score: {score}, MCap: ${market_cap:,.2f})")
+                    promising_tokens.append({
+                        'address': token_address,
+                        'score': score,
+                        'market_cap': market_cap,
+                        'data': parsed_data
+                    })
+            except Exception as e:
+                logging.error(f"Error processing transaction {signature[:8]}: {e}")
+                continue
+                    
+        if promising_tokens:
+            logging.info(f"Found {len(promising_tokens)} promising tokens, preparing Discord notification...")
+            # Sort by score and market cap
+            promising_tokens.sort(key=lambda x: (x['score'], x['market_cap']), reverse=True)
+            
+            try:
+                # Send Discord notification
+                embed = {
+                    "title": "🔥 High Confidence Token Opportunities",
+                    "description": "Found the following promising tokens:\n\n",
+                    "color": 0x00ff00
+                }
+                
+                for token in promising_tokens:
+                    embed["description"] += (
+                        f"**Token Address:** `{token['address']}`\n"
+                        f"**Confidence Score:** {token['score']:.2f}/100\n"
+                        f"**Market Cap:** ${token['market_cap']:,.2f}\n"
+                        f"**Holder Count:** {token['data'][9]}\n"
+                        f"**Buy/Sell Ratio:** {token['data'][12]}%\n"
+                        f"**Deployer:** `{token['data'][8]}`\n"
+                        f"🔗 [View on Solscan](https://solscan.io/token/{token['address']})\n\n"
+                    )
+                
+                webhook = DiscordWebhook(url=DISCORD_WEBHOOK_URL)
+                webhook.add_embed(embed)
+                response = webhook.execute()
+                
+                if response:
+                    logging.info("Successfully sent Discord notification")
+                else:
+                    logging.error("Failed to send Discord notification")
+            except Exception as e:
+                logging.error(f"Error sending Discord notification: {e}")
+        else:
+            logging.info("No high confidence tokens found in recent transactions.")
+            
+    except Exception as e:
+        logging.error(f"Error scanning for tokens: {e}", exc_info=True)
+    
+    return promising_tokens  # Return the tokens for potential further processing
+
 def main():
     init_db()
     
     if len(sys.argv) < 2:
-        print("Please provide a token address")
-        sys.exit(1)
+        print("\nScanning for high confidence tokens...\n")
+        asyncio.run(scan_for_promising_tokens())
+        return
     
     token_address = sys.argv[1]
     print(f"\nMonitoring token: {token_address}\n")
@@ -2419,7 +2580,6 @@ def main():
         if response.status_code == 200:
             data = response.json()
             if data.get('result') and data['result'].get('value'):
-                # Get latest transaction for the largest account
                 largest_account = data['result']['value'][0]['address']
                 
                 tx_payload = {
@@ -2463,7 +2623,7 @@ def main():
             notify_discord(parsed_data)
 
             deployer_address = parsed_data[8]
-            token_address = tx_data["transaction"]["message"]["accountKeys"][0]["pubkey"]  # Use first account as token
+            token_address = tx_data["transaction"]["message"]["accountKeys"][0]["pubkey"]
 
             # Calculate and log token score
             scorer = TokenScorer(DB_FILE)
@@ -2486,14 +2646,6 @@ def main():
             logging.warning("No valid data to save.")
     else:
         logging.error("Transaction fetch failed.")
-
-    # Run market cap check and deployer analysis
-    try:
-        asyncio.run(check_market_cap("token_address"))
-        result = asyncio.run(analyze_deployer_history(deployer_address))
-        logging.info(f"Deployer history analysis: {result}")
-    except Exception as e:
-        logging.error(f"Error running additional analyses: {e}")
 
 def notify_discord(tx_data):
     """Send a detailed notification to Discord."""
