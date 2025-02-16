@@ -383,59 +383,28 @@ class DeployerAnalyzer:
             #Where are these databases and what's the best way to understand them? 
 
     async def analyze_deployer(self, deployer_address: str) -> DeployerStats:
-        """Analyze deployer's history and update stats with enhanced metrics"""
+        """Analyze deployer's history and update stats"""
         # Check cache first
         if self._is_cache_valid(deployer_address):
             return self._cache[deployer_address]
 
-        with sqlite3.connect(self.db_file) as conn:
+        conn = sqlite3.connect(self.db_file)
+        try:
             c = conn.cursor()
             
-            # Get comprehensive token performance metrics
+            # Get deployer's token statistics
             c.execute('''
-                WITH PeakMarketCaps AS (
-                    SELECT token_address,
-                           MAX(market_cap) as peak_mcap,
-                           MAX(timestamp) as peak_time
-                    FROM token_market_cap_history
-                    GROUP BY token_address
-                ),
-                TokenPerformance AS (
-                    SELECT t.address as token_address,
-                           t.current_market_cap as current_mcap,
-                           t.launch_time as creation_time,
-                           p.peak_mcap,
-                           p.peak_time,
-                           (julianday(datetime(p.peak_time, 'unixepoch')) - 
-                            julianday(datetime(t.launch_time, 'unixepoch'))) as days_to_peak,
-                           CASE 
-                               WHEN t.current_market_cap >= 200000 THEN
-                                   (julianday(datetime(t.last_updated, 'unixepoch')) - 
-                                    julianday(datetime(t.launch_time, 'unixepoch')))
-                               ELSE NULL
-                           END as days_above_200k,
-                           CASE WHEN p.peak_mcap > 0 
-                                THEN (p.peak_mcap - t.current_market_cap) / p.peak_mcap 
-                                ELSE 0 
-                           END as drawdown
-                    FROM tokens t
-                    LEFT JOIN PeakMarketCaps p ON t.address = p.token_address
-                    WHERE t.deployer_address = ?
-                )
                 SELECT 
                     COUNT(*) as total_tokens,
-                    SUM(CASE WHEN current_mcap >= 3000000 THEN 1 ELSE 0 END) as tokens_above_3m,
-                    SUM(CASE WHEN current_mcap >= 200000 THEN 1 ELSE 0 END) as tokens_above_200k,
-                    MAX(creation_time) as last_token_time,
-                    AVG(days_above_200k) as avg_days_above_200k,
-                    AVG(peak_mcap) as avg_peak_mcap,
-                    AVG(drawdown) as avg_drawdown,
-                    AVG(days_to_peak) as avg_days_to_peak
-                FROM TokenPerformance
+                    SUM(CASE WHEN peak_market_cap >= 3000000 THEN 1 ELSE 0 END) as tokens_above_3m,
+                    SUM(CASE WHEN peak_market_cap >= 200000 THEN 1 ELSE 0 END) as tokens_above_200k,
+                    MAX(launch_time) as last_token_time
+                FROM tokens 
+                WHERE deployer_address = ?
             ''', (deployer_address,))
-            
+            #May need to see token staticstics before leaving this simply to a sum of above and below initially for better understnding
             row = c.fetchone()
-            current_time = int(time.time())
+            current_time = int(datetime.now().timestamp())
             
             if not row or row[0] == 0:
                 stats = DeployerStats(
@@ -453,32 +422,10 @@ class DeployerAnalyzer:
                 tokens_above_3m = row[1] or 0
                 tokens_above_200k = row[2] or 0
                 last_token_time = row[3]
-                avg_days_above_200k = row[4]
-                avg_peak_mcap = row[5]
-                avg_drawdown = row[6]
-                avg_days_to_peak = row[7]
                 
-                # Calculate enhanced failure rate
-                if total_tokens > 0:
-                    # Base failure rate from tokens not reaching 200k
-                    base_failure_rate = 1 - (tokens_above_200k / total_tokens)
-                    
-                    # Performance penalties
-                    performance_penalty = 0
-                    if avg_days_to_peak and avg_days_to_peak > 7:  # Penalize slow growth
-                        performance_penalty += min(0.2, (avg_days_to_peak - 7) * 0.02)
-                        
-                    if avg_drawdown and avg_drawdown > 0.5:  # Penalize high volatility
-                        performance_penalty += min(0.2, (avg_drawdown - 0.5) * 0.4)
-                        
-                    if avg_days_above_200k and avg_days_above_200k < 2:  # Penalize short-lived success
-                        performance_penalty += 0.2
-                    
-                    failure_rate = min(1.0, base_failure_rate + performance_penalty) * 100
-                    is_blacklisted = failure_rate >= 97
-                else:
-                    failure_rate = 0
-                    is_blacklisted = False
+                # Calculate failure rate
+                failure_rate = ((total_tokens - tokens_above_200k) / total_tokens) * 100 if total_tokens > 0 else 0
+                is_blacklisted = failure_rate >= 97
                 
                 stats = DeployerStats(
                     address=deployer_address,
@@ -491,23 +438,24 @@ class DeployerAnalyzer:
                     failure_rate=failure_rate
                 )
             
-            # Update deployer record with enhanced metrics
+            # Update deployer record
             c.execute('''
                 INSERT OR REPLACE INTO deployers 
                 (address, total_tokens, tokens_above_3m, tokens_above_200k, 
-                 last_token_time, is_blacklisted, last_updated, failure_rate,
-                 avg_days_to_200k, avg_peak_mcap, avg_max_drawdown)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                 last_token_time, is_blacklisted, last_updated, failure_rate)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
             ''', (
                 stats.address, stats.total_tokens, stats.tokens_above_3m,
                 stats.tokens_above_200k, stats.last_token_time,
-                stats.is_blacklisted, stats.last_updated, stats.failure_rate,
-                avg_days_above_200k, avg_peak_mcap, avg_drawdown
+                stats.is_blacklisted, stats.last_updated, stats.failure_rate
             ))
             
             conn.commit()
             self._cache[deployer_address] = stats
             return stats
+            
+        finally:
+            conn.close()
 
     def _is_cache_valid(self, deployer_address: str) -> bool:
         """Check if cached deployer stats are still valid"""
@@ -544,8 +492,6 @@ class DeployerAnalyzer:
                 if row and row[0] in self._cache:
                     del self._cache[row[0]]
                     
-        except Exception as e:
-            logging.error(f"Database error in update_token_mcap: {e}")
         finally:
             conn.close()
 
@@ -2027,47 +1973,6 @@ def init_db():
             )
         ''')
         
-        # Create token_market_cap_history table for tracking market cap changes
-        cursor.execute('''
-            CREATE TABLE IF NOT EXISTS token_market_cap_history (
-                token_address TEXT,
-                timestamp INTEGER,
-                market_cap REAL,
-                holder_count INTEGER,
-                PRIMARY KEY (token_address, timestamp),
-                FOREIGN KEY (token_address) REFERENCES tokens(token_address)
-            )
-        ''')
-        
-        # Create deployer_performance table for detailed token performance
-        cursor.execute('''
-            CREATE TABLE IF NOT EXISTS deployer_performance (
-                deployer_address TEXT,
-                token_address TEXT,
-                launch_date INTEGER,
-                peak_mcap REAL,
-                peak_mcap_date INTEGER,
-                current_mcap REAL,
-                success_duration INTEGER,
-                PRIMARY KEY (deployer_address, token_address),
-                FOREIGN KEY (deployer_address) REFERENCES deployers(address),
-                FOREIGN KEY (token_address) REFERENCES tokens(token_address)
-            )
-        ''')
-        
-        # Create token_lifecycle table for tracking token progression
-        cursor.execute('''
-            CREATE TABLE IF NOT EXISTS token_lifecycle (
-                token_address TEXT PRIMARY KEY,
-                launch_phase TEXT,
-                days_to_200k INTEGER,
-                days_to_3m INTEGER,
-                max_drawdown REAL,
-                volatility_score REAL,
-                FOREIGN KEY (token_address) REFERENCES tokens(token_address)
-            )
-        ''')
-        
         # Create wallet_labels table
         cursor.execute('''
             CREATE TABLE IF NOT EXISTS wallet_labels (
@@ -2593,18 +2498,27 @@ def main():
 def notify_discord(tx_data):
     """Send a detailed notification to Discord."""
     try:
+        if not all(x is not None for x in tx_data[:14]):  # Ensure all required data is present
+            logging.error(f"Missing data in tx_data: {tx_data}")
+            return
+            
+        block_time = datetime.fromtimestamp(tx_data[1], timezone.utc).strftime('%Y-%m-%d %H:%M:%S UTC')
+        tx_fee = tx_data[2] / 1e9 if tx_data[2] is not None else 0
+        
         embed = {
             "title": "New Token Transaction Alert!",
-            "description": f"**Transaction Signature:** `{tx_data[0]}`\n"
-                            f"**Block Time:** {datetime.fromtimestamp(tx_data[1], timezone.utc).strftime('%Y-%m-%d %H:%M:%S UTC')}\n"
-                            f"**Transaction Fee:** {tx_data[2] / 1e9:.8f} SOL\n"
-                            f"**Deployer Address:** `{tx_data[8]}`\n"
-                            f"**Holder Count:** {tx_data[9]}\n"
-                            f"**Sniper Count:** {tx_data[10]}\n"
-                            f"**Insider Count:** {tx_data[11]}\n"
-                            f"**Buy/Sell Ratio:** {tx_data[12]}%\n"
-                            f"**High Holder Count:** {tx_data[13]}\n\n"
-                            f"🔗 [View on Solana Explorer](https://solscan.io/tx/{tx_data[0]})",
+            "description": (
+                f"**Transaction Signature:** `{tx_data[0]}`\n"
+                f"**Block Time:** {block_time}\n"
+                f"**Transaction Fee:** {tx_fee:.8f} SOL\n"
+                f"**Deployer Address:** `{tx_data[8]}`\n"
+                f"**Holder Count:** {tx_data[9]}\n"
+                f"**Sniper Count:** {tx_data[10]}\n"
+                f"**Insider Count:** {tx_data[11]}\n"
+                f"**Buy/Sell Ratio:** {tx_data[12]}%\n"
+                f"**High Holder Count:** {tx_data[13]}\n\n"
+                f"🔗 [View on Solana Explorer](https://solscan.io/tx/{tx_data[0]})"
+            ),
             "color": 0x00ff00  # Green color
         }
         
@@ -2612,13 +2526,11 @@ def notify_discord(tx_data):
         webhook.add_embed(embed)
         
         response = webhook.execute()
-        if response.status_code == 204:
+        if response:
             logging.info("Discord notification sent successfully.")
-        else:
-            logging.error(f"Error sending notification: {response.text}")
             
     except Exception as e:
-        logging.error(f"Error in notify_discord: {e}")
+        logging.error(f"Error in notify_discord: {e}", exc_info=True)
 
 if __name__ == "__main__":
     main()
