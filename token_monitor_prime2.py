@@ -55,6 +55,9 @@ class TokenMetrics:
         self.large_holders = 0
         self.dev_sells = 0
 
+        # Token Metrics setting current stats one thing I'm realizing is that 
+        # I'm not seeing anything for market cap yet 
+
 class HolderAnalyzer:
     def __init__(self, db_file: str):
         self.db_file = db_file
@@ -169,6 +172,10 @@ class HolderAnalyzer:
             await self._analyze_transactions(tx_history, metrics, deployer_address)
             
             return metrics
+
+
+            #Metrics seems to be where stats are held may help to figure out issues 
+            #with calculating metrics 
             
         except Exception as e:
             logging.error(f"Error analyzing token metrics: {e}")
@@ -190,7 +197,7 @@ class HolderAnalyzer:
         except Exception as e:
             logging.error(f"Error in _fetch_holder_data: {e}")
             return []
-
+#I'm almost certain that this api is working correctly may need to check it again
     async def _process_holder_data(self, holder_data: List[Dict], metrics: TokenMetrics, deployer_address: str):
         """Process holder data and update metrics"""
         try:
@@ -217,7 +224,7 @@ class HolderAnalyzer:
             
         except Exception as e:
             logging.error(f"Error processing holder data: {e}")
-
+#This is where we're saving at least one of our database is this actually showing correctly?
     async def _analyze_transactions(self, tx_history: List[Dict], metrics: TokenMetrics, deployer_address: str):
         """Analyze transaction patterns"""
         try:
@@ -309,6 +316,10 @@ class DeployerStats:
         self.last_updated = last_updated
         self.failure_rate = failure_rate
 
+
+        #can't tell if deployer stats is actually pulling appropriately on these intergers or it's 
+        #just a placeholder
+
     def __str__(self) -> str:
         """String representation for logging and debugging"""
         return (f"DeployerStats(address={self.address}, total_tokens={self.total_tokens}, "
@@ -335,7 +346,10 @@ class DeployerAnalyzer:
                     last_token_time INTEGER,
                     is_blacklisted BOOLEAN DEFAULT FALSE,
                     last_updated INTEGER,
-                    failure_rate REAL DEFAULT 0
+                    failure_rate REAL DEFAULT 0,
+                    avg_days_to_200k REAL,
+                    avg_peak_mcap REAL,
+                    avg_max_drawdown REAL
                 )
             ''')
 
@@ -366,29 +380,62 @@ class DeployerAnalyzer:
             
             conn.commit()
 
+            #Where are these databases and what's the best way to understand them? 
+
     async def analyze_deployer(self, deployer_address: str) -> DeployerStats:
-        """Analyze deployer's history and update stats"""
+        """Analyze deployer's history and update stats with enhanced metrics"""
         # Check cache first
         if self._is_cache_valid(deployer_address):
             return self._cache[deployer_address]
 
-        conn = sqlite3.connect(self.db_file)
-        try:
+        with sqlite3.connect(self.db_file) as conn:
             c = conn.cursor()
             
-            # Get deployer's token statistics
+            # Get comprehensive token performance metrics
             c.execute('''
+                WITH TokenPerformance AS (
+                    SELECT t.token_address,
+                           t.market_cap as current_mcap,
+                           t.creation_time,
+                           tmh.peak_mcap,
+                           tmh.peak_time,
+                           (julianday(datetime(tmh.peak_time, 'unixepoch')) - 
+                            julianday(datetime(t.creation_time, 'unixepoch'))) as days_to_peak,
+                           CASE 
+                               WHEN t.market_cap >= 200000 THEN
+                                   (julianday(datetime(t.last_updated, 'unixepoch')) - 
+                                    julianday(datetime(t.creation_time, 'unixepoch')))
+                               ELSE NULL
+                           END as days_above_200k,
+                           CASE WHEN tmh.peak_mcap > 0 
+                                THEN (tmh.peak_mcap - t.market_cap) / tmh.peak_mcap 
+                                ELSE 0 
+                           END as drawdown
+                    FROM tokens t
+                    LEFT JOIN (
+                        SELECT token_address, 
+                               MAX(market_cap) as peak_mcap,
+                               MAX(CASE WHEN market_cap = MAX(market_cap) OVER (PARTITION BY token_address) 
+                                   THEN timestamp END) as peak_time
+                        FROM token_market_cap_history
+                        GROUP BY token_address
+                    ) tmh ON t.token_address = tmh.token_address
+                    WHERE t.deployer_address = ?
+                )
                 SELECT 
                     COUNT(*) as total_tokens,
-                    SUM(CASE WHEN peak_market_cap >= 3000000 THEN 1 ELSE 0 END) as tokens_above_3m,
-                    SUM(CASE WHEN peak_market_cap >= 200000 THEN 1 ELSE 0 END) as tokens_above_200k,
-                    MAX(launch_time) as last_token_time
-                FROM tokens 
-                WHERE deployer_address = ?
+                    SUM(CASE WHEN current_mcap >= 3000000 THEN 1 ELSE 0 END) as tokens_above_3m,
+                    SUM(CASE WHEN current_mcap >= 200000 THEN 1 ELSE 0 END) as tokens_above_200k,
+                    MAX(creation_time) as last_token_time,
+                    AVG(days_above_200k) as avg_days_above_200k,
+                    AVG(peak_mcap) as avg_peak_mcap,
+                    AVG(drawdown) as avg_drawdown,
+                    AVG(days_to_peak) as avg_days_to_peak
+                FROM TokenPerformance
             ''', (deployer_address,))
             
             row = c.fetchone()
-            current_time = int(datetime.now().timestamp())
+            current_time = int(time.time())
             
             if not row or row[0] == 0:
                 stats = DeployerStats(
@@ -406,10 +453,32 @@ class DeployerAnalyzer:
                 tokens_above_3m = row[1] or 0
                 tokens_above_200k = row[2] or 0
                 last_token_time = row[3]
+                avg_days_above_200k = row[4]
+                avg_peak_mcap = row[5]
+                avg_drawdown = row[6]
+                avg_days_to_peak = row[7]
                 
-                # Calculate failure rate
-                failure_rate = ((total_tokens - tokens_above_200k) / total_tokens) * 100 if total_tokens > 0 else 0
-                is_blacklisted = failure_rate >= 97
+                # Calculate enhanced failure rate
+                if total_tokens > 0:
+                    # Base failure rate from tokens not reaching 200k
+                    base_failure_rate = 1 - (tokens_above_200k / total_tokens)
+                    
+                    # Performance penalties
+                    performance_penalty = 0
+                    if avg_days_to_peak and avg_days_to_peak > 7:  # Penalize slow growth
+                        performance_penalty += min(0.2, (avg_days_to_peak - 7) * 0.02)
+                        
+                    if avg_drawdown and avg_drawdown > 0.5:  # Penalize high volatility
+                        performance_penalty += min(0.2, (avg_drawdown - 0.5) * 0.4)
+                        
+                    if avg_days_above_200k and avg_days_above_200k < 2:  # Penalize short-lived success
+                        performance_penalty += 0.2
+                    
+                    failure_rate = min(1.0, base_failure_rate + performance_penalty) * 100
+                    is_blacklisted = failure_rate >= 97
+                else:
+                    failure_rate = 0
+                    is_blacklisted = False
                 
                 stats = DeployerStats(
                     address=deployer_address,
@@ -422,24 +491,23 @@ class DeployerAnalyzer:
                     failure_rate=failure_rate
                 )
             
-            # Update deployer record
+            # Update deployer record with enhanced metrics
             c.execute('''
                 INSERT OR REPLACE INTO deployers 
                 (address, total_tokens, tokens_above_3m, tokens_above_200k, 
-                 last_token_time, is_blacklisted, last_updated, failure_rate)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                 last_token_time, is_blacklisted, last_updated, failure_rate,
+                 avg_days_to_200k, avg_peak_mcap, avg_max_drawdown)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             ''', (
                 stats.address, stats.total_tokens, stats.tokens_above_3m,
                 stats.tokens_above_200k, stats.last_token_time,
-                stats.is_blacklisted, stats.last_updated, stats.failure_rate
+                stats.is_blacklisted, stats.last_updated, stats.failure_rate,
+                avg_days_above_200k, avg_peak_mcap, avg_drawdown
             ))
             
             conn.commit()
             self._cache[deployer_address] = stats
             return stats
-            
-        finally:
-            conn.close()
 
     def _is_cache_valid(self, deployer_address: str) -> bool:
         """Check if cached deployer stats are still valid"""
@@ -476,8 +544,12 @@ class DeployerAnalyzer:
                 if row and row[0] in self._cache:
                     del self._cache[row[0]]
                     
+        except Exception as e:
+            logging.error(f"Database error in update_token_mcap: {e}")
         finally:
             conn.close()
+
+            #Where can I see where this is being calculated and kept? In the analyze_deployer function
 
     async def is_blacklisted(self, deployer_address: str) -> bool:
         """Check if a deployer is blacklisted"""
@@ -1952,6 +2024,47 @@ def init_db():
                 is_blacklisted BOOLEAN DEFAULT 0,
                 last_updated INTEGER,
                 failure_rate REAL DEFAULT 0
+            )
+        ''')
+        
+        # Create token_market_cap_history table for tracking market cap changes
+        cursor.execute('''
+            CREATE TABLE IF NOT EXISTS token_market_cap_history (
+                token_address TEXT,
+                timestamp INTEGER,
+                market_cap REAL,
+                holder_count INTEGER,
+                PRIMARY KEY (token_address, timestamp),
+                FOREIGN KEY (token_address) REFERENCES tokens(token_address)
+            )
+        ''')
+        
+        # Create deployer_performance table for detailed token performance
+        cursor.execute('''
+            CREATE TABLE IF NOT EXISTS deployer_performance (
+                deployer_address TEXT,
+                token_address TEXT,
+                launch_date INTEGER,
+                peak_mcap REAL,
+                peak_mcap_date INTEGER,
+                current_mcap REAL,
+                success_duration INTEGER,
+                PRIMARY KEY (deployer_address, token_address),
+                FOREIGN KEY (deployer_address) REFERENCES deployers(address),
+                FOREIGN KEY (token_address) REFERENCES tokens(token_address)
+            )
+        ''')
+        
+        # Create token_lifecycle table for tracking token progression
+        cursor.execute('''
+            CREATE TABLE IF NOT EXISTS token_lifecycle (
+                token_address TEXT PRIMARY KEY,
+                launch_phase TEXT,
+                days_to_200k INTEGER,
+                days_to_3m INTEGER,
+                max_drawdown REAL,
+                volatility_score REAL,
+                FOREIGN KEY (token_address) REFERENCES tokens(token_address)
             )
         ''')
         
