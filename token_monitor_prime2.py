@@ -3,6 +3,8 @@ import sys
 import sqlite3
 import json
 import requests
+import aiohttp
+import logging
 import time
 import threading
 import itertools
@@ -1138,13 +1140,48 @@ class TokenScorer:
             logging.error(f"Error in sniper score calculation: {str(e)}")
             return 0.0  # Return zero score on error to be conservative
 
+    async def get_token_price(self, token_address: str) -> float:
+        """Get token price from Jupiter API"""
+        try:
+            url = f"https://price.jup.ag/v4/price?ids={token_address}"
+            async with aiohttp.ClientSession() as session:
+                async with session.get(url) as response:
+                    if response.status == 200:
+                        data = await response.json()
+                        if data.get('data') and token_address in data['data']:
+                            price = float(data['data'][token_address]['price'])
+                            logging.info(f"Jupiter price for {token_address}: ${price:.10f}")
+                            return price
+                    logging.info(f"No price data from Jupiter for {token_address}")
+                    return 0.0
+        except Exception as e:
+            logging.error(f"Error fetching Jupiter price: {e}")
+            return 0.0
+
+    def get_token_supply(self, token_address: str) -> float:
+        """Get token total supply from database"""
+        try:
+            conn = sqlite3.connect(self.db_file)
+            c = conn.cursor()
+            c.execute('SELECT total_supply FROM tokens WHERE address = ?', (token_address,))
+            result = c.fetchone()
+            if result and result[0]:
+                return float(result[0])
+            logging.info(f"No supply data for token {token_address}")
+            return 0.0
+        except Exception as e:
+            logging.error(f"Error getting token supply: {e}")
+            return 0.0
+        finally:
+            conn.close()
+
     async def _get_market_cap_score(self, token_address: str) -> float:
         """Calculate score based on market cap growth and stability"""
         try:
             conn = sqlite3.connect(self.db_file)
             c = conn.cursor()
             
-            # Get market cap data
+            # Get market cap data from tokens table
             c.execute('''
                 SELECT current_market_cap, peak_market_cap
                 FROM tokens 
@@ -1152,33 +1189,84 @@ class TokenScorer:
             ''', (token_address,))
             
             result = c.fetchone()
+            current_mcap = 0.0
+            peak_mcap = 0.0
+            
             if not result or not result[0]:
-                logging.info(f"No market cap data for token {token_address}")
-                return 30.0  # Lower score for new/unknown tokens
-                
-            current_mcap = float(result[0])
-            peak_mcap = float(result[1] or current_mcap)
-            # Base score from market cap size
+                logging.info(f"No market cap data in database for token {token_address}")
+                # Try to get current price from Jupiter
+                price = await self.get_token_price(token_address)
+                if price and price > 0:
+                    supply = self.get_token_supply(token_address)
+                    if supply > 0:
+                        current_mcap = price * supply
+                        peak_mcap = current_mcap  # For new tokens, current = peak
+                        logging.info(f"Calculated market cap: ${current_mcap:,.2f} (price=${price:.10f}, supply={supply:,.0f})")
+                        
+                        # Update database with new market cap data
+                        c.execute('''
+                            UPDATE tokens 
+                            SET current_market_cap = ?, peak_market_cap = COALESCE(MAX(peak_market_cap, ?), ?)
+                            WHERE address = ?
+                        ''', (current_mcap, current_mcap, current_mcap, token_address))
+                        conn.commit()
+                    else:
+                        logging.info(f"No supply data available for {token_address}")
+                        return 30.0
+                else:
+                    logging.info(f"No price data available for {token_address}")
+                    return 30.0
+            else:
+                current_mcap = float(result[0])
+                peak_mcap = float(result[1] or current_mcap)
+                logging.info(f"Market cap from database: ${current_mcap:,.2f} (peak=${peak_mcap:,.2f})")
+            
+            # Calculate base score from market cap size
             if current_mcap < 30000:
                 base_score = 30.0
+                logging.info(f"Market cap ${current_mcap:,.2f} < $30k -> base score: 30.0")
             elif current_mcap < 100000:
-                base_score = 50.0
+                base_score = 40.0
+                logging.info(f"Market cap ${current_mcap:,.2f} < $100k -> base score: 40.0")
             elif current_mcap < 500000:
+                base_score = 50.0
+                logging.info(f"Market cap ${current_mcap:,.2f} < $500k -> base score: 50.0")
+            elif current_mcap < 1000000:
+                base_score = 60.0
+                logging.info(f"Market cap ${current_mcap:,.2f} < $1M -> base score: 60.0")
+            elif current_mcap < 5000000:
                 base_score = 70.0
+                logging.info(f"Market cap ${current_mcap:,.2f} < $5M -> base score: 70.0")
             else:
-                base_score = 85.0
+                base_score = 80.0
+                logging.info(f"Market cap ${current_mcap:,.2f} >= $5M -> base score: 80.0")
             
-            # Stability bonus (up to 10 points)
-            stability_ratio = current_mcap / peak_mcap
-            stability_bonus = stability_ratio * 10.0
+            # Apply stability bonus/penalty based on peak ratio
+            if peak_mcap > 0:
+                peak_ratio = current_mcap / peak_mcap
+                if peak_ratio >= 0.8:  # Less than 20% drop from peak
+                    stability_bonus = 20.0
+                    logging.info(f"Strong stability (peak ratio {peak_ratio:.2f}) -> +20.0 bonus")
+                elif peak_ratio >= 0.5:  # Less than 50% drop from peak
+                    stability_bonus = 10.0
+                    logging.info(f"Moderate stability (peak ratio {peak_ratio:.2f}) -> +10.0 bonus")
+                elif peak_ratio >= 0.3:  # Less than 70% drop from peak
+                    stability_bonus = 0.0
+                    logging.info(f"Neutral stability (peak ratio {peak_ratio:.2f}) -> no adjustment")
+                else:  # More than 70% drop from peak
+                    stability_bonus = -10.0
+                    logging.info(f"Poor stability (peak ratio {peak_ratio:.2f}) -> -10.0 penalty")
+            else:
+                stability_bonus = 0.0
+                logging.info("No peak data available -> no stability adjustment")
             
-            final_score = min(base_score + stability_bonus, 100)
-            logging.info(f"Market cap score: {final_score:.2f} (mcap=${current_mcap:,.2f}, stability={stability_ratio:.2f}, growth=${hourly_growth:,.2f}/h)")
+            final_score = min(100.0, max(0.0, base_score + stability_bonus))
+            logging.info(f"Final market cap score: {final_score:.1f}")
             return final_score
             
         except Exception as e:
             logging.error(f"Error in market cap score calculation: {e}")
-            return 30.0  # Conservative score on error
+            return 30.0  # Return conservative score on error
         finally:
             if 'conn' in locals():
                 conn.close()
