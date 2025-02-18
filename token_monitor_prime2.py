@@ -1435,63 +1435,80 @@ class MarketCapAnalyzer:
     async def get_market_cap(self, token_address: str) -> float:
         """Calculate current market cap for a token"""
         try:
-            metadata = await self.rate_limiter.execute_with_retry(
-                self._get_token_metadata,
-                token_address
-            )
-            if not metadata:
-                return 0
-            
-            price = await self.rate_limiter.execute_with_retry(
-                self._get_token_price,
-                token_address
-            )
-            if not price:
-                return 0
-
-            supply = metadata.get('supply', 0)
-            return float(supply) * price
+            async with aiohttp.ClientSession() as session:
+                # Get token supply from Helius
+                url = "https://mainnet.helius-rpc.com/"
+                headers = {"Content-Type": "application/json"}
+                supply_payload = {
+                    "jsonrpc": "2.0",
+                    "id": 1,
+                    "method": "getTokenSupply",
+                    "params": [token_address]
+                }
+                
+                async with session.post(url + "?api-key=" + HELIUS_API_KEY, json=supply_payload, headers=headers) as response:
+                    if response.status != 200:
+                        return 0
+                    supply_data = await response.json()
+                    
+                    if not supply_data.get("result", {}).get("value"):
+                        return 0
+                        
+                    total_supply = float(supply_data["result"]["value"]["amount"])
+                    decimals = supply_data["result"]["value"]["decimals"]
+                    adjusted_supply = total_supply / (10 ** decimals)
+                
+                # Get price from Jupiter
+                jupiter_url = f"https://price.jup.ag/v4/price?ids={token_address}"
+                async with session.get(jupiter_url) as response:
+                    if response.status != 200:
+                        return 0
+                    price_data = await response.json()
+                    price = float(price_data.get("data", {}).get(token_address, {}).get("price", 0))
+                
+                market_cap = adjusted_supply * price
+                logging.info(f"Market cap calculation for {token_address}: Supply={adjusted_supply:.2f}, Price=${price:.6f}, MCap=${market_cap:.2f}")
+                return market_cap
+                
         except Exception as e:
             logging.error(f"Error calculating market cap: {e}")
             return 0
 
-    async def _get_token_metadata(self, token_address: str) -> dict:
-        """Get token metadata from Helius API"""
-        try:
-            async with aiohttp.ClientSession() as session:
-                payload = {
-                    "jsonrpc": "2.0",
-                    "id": "my-id",
-                    "method": "getAsset",
-                    "params": {
-                        "id": token_address
-                    }
-                }
-                async with session.post(self.api_url, json=payload) as response:
-                    if response.status == 200:
-                        data = await response.json()
-                        return {
-                            'decimals': data['result'].get('token_info', {}).get('decimals', 9),
-                            'supply': data['result'].get('token_info', {}).get('supply', '0')
-                        }
-            return None
-        except Exception as e:
-            logging.error(f"Error fetching token metadata: {e}")
-            return None
-
-    async def _get_token_price(self, token_address: str) -> float:
-        """Get token price from Jupiter API"""
-        try:
-            jupiter_url = f"https://price.jup.ag/v4/price?ids={token_address}"
-            async with aiohttp.ClientSession() as session:
-                async with session.get(jupiter_url) as response:
-                    if response.status == 200:
-                        data = await response.json()
-                        return float(data.get('data', {}).get(token_address, {}).get('price', 0))
+async def _calculate_market_cap(token_address, session):
+    """Helper function to calculate market cap using provided session"""
+    # Get token supply from Helius
+    url = "https://mainnet.helius-rpc.com/"
+    headers = {"Content-Type": "application/json"}
+    supply_payload = {
+        "jsonrpc": "2.0",
+        "id": 1,
+        "method": "getTokenSupply",
+        "params": [token_address]
+    }
+    
+    async with session.post(url + "?api-key=" + HELIUS_API_KEY, json=supply_payload, headers=headers) as response:
+        if response.status != 200:
             return 0
-        except Exception as e:
-            logging.error(f"Error fetching token price: {e}")
+        supply_data = await response.json()
+        
+        if not supply_data.get("result", {}).get("value"):
             return 0
+            
+        total_supply = float(supply_data["result"]["value"]["amount"])
+        decimals = supply_data["result"]["value"]["decimals"]
+        adjusted_supply = total_supply / (10 ** decimals)
+    
+    # Get price from Jupiter
+    jupiter_url = f"https://price.jup.ag/v4/price?ids={token_address}"
+    async with session.get(jupiter_url) as response:
+        if response.status != 200:
+            return 0
+        price_data = await response.json()
+        price = float(price_data.get("data", {}).get(token_address, {}).get("price", 0))
+    
+    market_cap = adjusted_supply * price
+    logging.info(f"Market cap calculation for {token_address}: Supply={adjusted_supply:.2f}, Price=${price:.6f}, MCap=${market_cap:.2f}")
+    return market_cap
 
     def is_above_threshold(self, market_cap: float, threshold: float = 30000) -> bool:
         """Check if market cap is above threshold"""
@@ -2103,37 +2120,54 @@ def save_transaction_to_db(tx_data):
     conn.commit()
     conn.close()
 
-async def check_market_cap(token_address):
-    """Check if token surpasses 30,000 market cap threshold"""
-    url = f"https://mainnet.helius-rpc.com/?api-key={HELIUS_API_KEY}"
-    headers = {"Content-Type": "application/json"}
-    
+async def check_market_cap(token_address, session=None):
+    """Check market cap of token using Jupiter API for price and Helius for supply"""
     try:
-        # Get token supply
-        supply_payload = {
-            "jsonrpc": "2.0",
-            "id": 1,
-            "method": "getTokenSupply",
-            "params": [token_address]
-        }
-        
-        response = requests.post(url, headers=headers, json=supply_payload)
-        if response.status_code == 200:
-            supply_data = response.json()
-            if "result" in supply_data and "value" in supply_data["result"]:
-                total_supply = float(supply_data["result"]["value"]["amount"])
-                decimals = supply_data["result"]["value"]["decimals"]
-                adjusted_supply = total_supply / (10 ** decimals)
-                
-                # For now, we'll use a simplified check based on supply
-                # You can enhance this with actual DEX price data later
-                if adjusted_supply > 0:
-                    logging.info(f"Token {token_address} supply: {adjusted_supply}")
-                    return True
-        return False
+        # Create a session if one wasn't provided
+        if session is None:
+            async with aiohttp.ClientSession() as session:
+                return await _calculate_market_cap(token_address, session)
+        else:
+            return await _calculate_market_cap(token_address, session)
     except Exception as e:
-        logging.error(f"Error checking market cap: {e}")
-        return False
+        logging.error(f"Error calculating market cap: {e}")
+        return 0
+
+async def _calculate_market_cap(token_address, session):
+    """Helper function to calculate market cap using provided session"""
+    # Get token supply from Helius
+    url = "https://mainnet.helius-rpc.com/"
+    headers = {"Content-Type": "application/json"}
+    supply_payload = {
+        "jsonrpc": "2.0",
+        "id": 1,
+        "method": "getTokenSupply",
+        "params": [token_address]
+    }
+    
+    async with session.post(url + "?api-key=" + HELIUS_API_KEY, json=supply_payload, headers=headers) as response:
+        if response.status != 200:
+            return 0
+        supply_data = await response.json()
+        
+        if not supply_data.get("result", {}).get("value"):
+            return 0
+            
+        total_supply = float(supply_data["result"]["value"]["amount"])
+        decimals = supply_data["result"]["value"]["decimals"]
+        adjusted_supply = total_supply / (10 ** decimals)
+    
+    # Get price from Jupiter
+    jupiter_url = f"https://price.jup.ag/v4/price?ids={token_address}"
+    async with session.get(jupiter_url) as response:
+        if response.status != 200:
+            return 0
+        price_data = await response.json()
+        price = float(price_data.get("data", {}).get(token_address, {}).get("price", 0))
+    
+    market_cap = adjusted_supply * price
+    logging.info(f"Market cap calculation for {token_address}: Supply={adjusted_supply:.2f}, Price=${price:.6f}, MCap=${market_cap:.2f}")
+    return market_cap
 
 async def analyze_deployer_history(deployer_address):
     """
@@ -2244,6 +2278,7 @@ def is_successful_token(tx_data):
         # Check if it has significant holder count (from your DB)
         conn = sqlite3.connect(DB_FILE)
         c = conn.cursor()
+        
         c.execute('SELECT holder_count FROM transactions WHERE signature = ?', 
                  (tx_data["transaction"]["signatures"][0],))
         result = c.fetchone()
@@ -2623,7 +2658,7 @@ def main():
             notify_discord(parsed_data)
 
             deployer_address = parsed_data[8]
-            token_address = tx_data["transaction"]["message"]["accountKeys"][0]["pubkey"]
+            token_address = parsed_data[0]  # Token address is the first element in parsed_data
 
             # Calculate and log token score
             scorer = TokenScorer(DB_FILE)
