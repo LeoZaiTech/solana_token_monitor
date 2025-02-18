@@ -930,27 +930,38 @@ class TokenScorer:
     async def calculate_token_score(self, token_address: str, tx_data: tuple) -> float:
         """Calculate a comprehensive confidence score for a token."""
         try:
+            # Get individual component scores
             scores = {
-                'deployer_score': await self._get_deployer_score(tx_data[8]),  # 25%
-                'holder_score': self._get_holder_score(tx_data),  # 20%
+                'deployer_score': await self._get_deployer_score(tx_data[8]),  # 30%
+                'holder_score': self._get_holder_score(tx_data),  # 25%
                 'transaction_score': self._get_transaction_score(tx_data),  # 20%
                 'sniper_score': await self._get_sniper_score(tx_data),  # 15%
-                'market_cap_score': await self._get_market_cap_score(token_address),  # 10%
-                'twitter_score': await self._get_twitter_score(token_address)  # 10%
+                'market_cap_score': await self._get_market_cap_score(token_address)  # 10%
             }
-
+            
+            # Weight multipliers
             weights = {
-                'deployer_score': 0.25,
-                'holder_score': 0.20,
-                'transaction_score': 0.20,
-                'sniper_score': 0.15,
-                'market_cap_score': 0.10,
-                'twitter_score': 0.10
+                'deployer_score': 0.30,    # Deployer history is crucial
+                'holder_score': 0.25,      # Holder distribution is important
+                'transaction_score': 0.20,  # Transaction patterns matter
+                'sniper_score': 0.15,      # Sniper presence is a concern
+                'market_cap_score': 0.10   # Market cap adds stability
             }
-
+            
+            # Calculate final score
             final_score = sum(scores[key] * weights[key] for key in scores)
+            
+            # Log detailed component scores for debugging
+            logging.info(f"Token {token_address} component scores:")
+            for component, score in scores.items():
+                logging.info(f"- {component}: {score:.2f} (raw) -> {score * weights[component]:.2f} (weighted)")
+            logging.info(f"Final confidence score: {final_score:.2f}/100")
+            
+            # Save scores to database
             await self._save_score(token_address, final_score, scores)
+            
             return float(final_score)
+            
         except Exception as e:
             logging.error(f"Error in calculate_token_score: {str(e)}")
             return 0.0
@@ -974,34 +985,84 @@ class TokenScorer:
 
     async def _get_deployer_score(self, deployer_address: str) -> float:
         """Calculate score based on deployer's history"""
-        stats = await self.deployer_analyzer.analyze_deployer(deployer_address)
-        
-        if stats.is_blacklisted:
-            return 0.0
+        try:
+            stats = await self.deployer_analyzer.analyze_deployer(deployer_address)
+            
+            if stats.is_blacklisted:
+                logging.info(f"Deployer {deployer_address} is blacklisted")
+                return 0.0
 
-        # Calculate success rate
-        success_rate = (stats.tokens_above_200k / max(stats.total_tokens, 1)) * 100
-        
-        # Bonus for having tokens above 3M
-        high_success_bonus = min((stats.tokens_above_3m / max(stats.total_tokens, 1)) * 20, 20)
-        
-        # Experience factor (more tokens = more experience, up to a point)
-        experience_factor = min(stats.total_tokens / 10, 1.0)  # Cap at 10 tokens
-        
-        base_score = (success_rate * 0.8) + high_success_bonus
-        return min(base_score * (0.5 + 0.5 * experience_factor), 100)
+            total_tokens = max(stats.total_tokens, 1)
+            
+            # Calculate success metrics
+            success_rate = (stats.tokens_above_200k / total_tokens) * 100
+            high_success_rate = (stats.tokens_above_3m / total_tokens) * 100
+            
+            # Base score from success rates
+            base_score = success_rate * 0.6 + high_success_rate * 0.4
+            
+            # Experience bonus (more tokens = more experience, up to a point)
+            experience_bonus = min(stats.total_tokens * 2, 20)  # Up to 20 points for 10+ tokens
+            
+            # Recent activity bonus
+            time_since_last = time.time() - stats.last_token_time
+            activity_bonus = 10 if time_since_last < 30 * 24 * 3600 else 0  # 10 points if active in last 30 days
+            
+            # Calculate final score
+            final_score = min(base_score + experience_bonus + activity_bonus, 100)
+            
+            logging.info(f"Deployer {deployer_address} score: {final_score:.2f} (success_rate={success_rate:.2f}, high_success={high_success_rate:.2f}, exp_bonus={experience_bonus:.2f}, activity_bonus={activity_bonus})")
+            return final_score
+            
+        except Exception as e:
+            logging.error(f"Error calculating deployer score: {e}")
+            return 50.0  # Neutral score on error
+
+    def safe_int(self, val, default=0) -> int:
+        """Safely convert value to integer with default on error"""
+        try:
+            if isinstance(val, str) and '{' in val:  # Check for error JSON
+                return default
+            return int(val) if val is not None else default
+        except (ValueError, TypeError):
+            return default
 
     def _get_holder_score(self, tx_data: tuple) -> float:
         """Calculate score based on holder distribution"""
         try:
-            holder_count = tx_data[9] or 0
-            high_holder_count = tx_data[13] or 0
+            holder_count = self.safe_int(tx_data[9], 0)
+            high_holder_count = self.safe_int(tx_data[13], 0)
             
-            # Penalize if too few holders
+            # Base score from holder count
             if holder_count < 10:
-                return 20.0
-                
-            # Heavily penalize if too many high-balance holders
+                base_score = 20.0
+            elif holder_count < 50:
+                base_score = 40.0 + (holder_count - 10) * 1.0  # Linear increase up to 50 holders
+            elif holder_count < 200:
+                base_score = 80.0 + (holder_count - 50) * 0.1  # Slower increase up to 200 holders
+            else:
+                base_score = 95.0  # Maximum base score
+            
+            # Penalize for high concentration
+            if high_holder_count > 2:
+                concentration_penalty = (high_holder_count - 2) * 15
+                base_score = max(0, base_score - concentration_penalty)
+            
+            # Distribution bonus
+            if high_holder_count == 0:
+                distribution_bonus = 20  # Perfect distribution
+            elif high_holder_count == 1:
+                distribution_bonus = 10  # Good distribution
+            else:
+                distribution_bonus = 0   # No bonus for concentrated holdings
+            
+            final_score = min(base_score + distribution_bonus, 100)
+            logging.info(f"Holder score: {final_score:.2f} (holders={holder_count}, high_holders={high_holder_count})")
+            return final_score
+            
+        except Exception as e:
+            logging.error(f"Error in holder score calculation: {e}")
+            return 0.0
             if high_holder_count > 2:
                 return max(40 - (high_holder_count - 2) * 20, 0)
                 
@@ -1020,50 +1081,62 @@ class TokenScorer:
         """Calculate score based on transaction patterns"""
         try:
             buy_sell_ratio = float(tx_data[12] or 0)
+            total_txns = self.safe_int(tx_data[10], 0) + self.safe_int(tx_data[11], 0)
             
-            # Penalize extreme buy/sell ratios
-            if buy_sell_ratio > 70 or buy_sell_ratio < 30:
-                return max(50 - abs(50 - buy_sell_ratio), 0)
-                
-            # Ideal ratio is close to 50/50
-            ratio_score = 100 - abs(50 - buy_sell_ratio)
+            # Base score from buy/sell ratio
+            if buy_sell_ratio > 80 or buy_sell_ratio < 20:
+                ratio_score = 0  # Extreme imbalance
+            elif buy_sell_ratio > 70 or buy_sell_ratio < 30:
+                ratio_score = 30  # Significant imbalance
+            elif buy_sell_ratio > 60 or buy_sell_ratio < 40:
+                ratio_score = 70  # Moderate imbalance
+            else:
+                ratio_score = 100  # Good balance
             
-            return float(ratio_score)
-        except (IndexError, TypeError, ValueError) as e:
+            # Transaction volume bonus
+            volume_bonus = min(total_txns / 10, 20)  # Up to 20 points for 200+ transactions
+            
+            final_score = min(ratio_score + volume_bonus, 100)
+            logging.info(f"Transaction score: {final_score:.2f} (ratio={buy_sell_ratio:.2f}, volume_bonus={volume_bonus:.2f})")
+            return final_score
+            
+        except Exception as e:
             logging.error(f"Error in transaction score calculation: {e}")
             return 0.0
 
     async def _get_sniper_score(self, tx_data: tuple) -> float:
-        """Calculate score based on sniper and insider presence using basic metrics"""
+        """Calculate score based on sniper and insider presence"""
         try:
-            # Safely parse integer values with error handling
-            def safe_int(val, default=0):
-                try:
-                    if isinstance(val, str) and '{' in val:  # Check for error JSON
-                        return default
-                    return int(val) if val is not None else default
-                except (ValueError, TypeError):
-                    return default
-
-            # Get basic metrics we need
-            sniper_count = safe_int(tx_data[10])
-            insider_count = safe_int(tx_data[11])
-            large_holders = safe_int(tx_data[7])
+            # Get metrics
+            sniper_count = self.safe_int(tx_data[10], 0)
+            insider_count = self.safe_int(tx_data[11], 0)
+            large_holders = self.safe_int(tx_data[7], 0)
             
-            # Simple scoring based on direct metrics
-            score = 1.0
+            # Start with perfect score and apply penalties
+            score = 100.0
+            
+            # Sniper penalties
             if sniper_count > 0:
-                score -= 0.35
+                sniper_penalty = min(sniper_count * 30, 70)  # Up to 70 point penalty
+                score -= sniper_penalty
+            
+            # Insider penalties
             if insider_count > 0:
-                score -= 0.25
-            if large_holders < 3:
-                score -= 0.20
-                
-            return max(0.0, score)
+                insider_penalty = min(insider_count * 25, 60)  # Up to 60 point penalty
+                score -= insider_penalty
+            
+            # Large holder penalties
+            if large_holders > 2:
+                holder_penalty = (large_holders - 2) * 15  # 15 points per excess large holder
+                score -= holder_penalty
+            
+            final_score = max(0, score)
+            logging.info(f"Sniper score: {final_score:.2f} (snipers={sniper_count}, insiders={insider_count}, large_holders={large_holders})")
+            return final_score
             
         except Exception as e:
             logging.error(f"Error in sniper score calculation: {str(e)}")
-            return 0.5  # Return neutral score on error
+            return 0.0  # Return zero score on error to be conservative
 
     async def _get_market_cap_score(self, token_address: str) -> float:
         """Calculate score based on market cap growth and stability"""
@@ -1071,37 +1144,48 @@ class TokenScorer:
             conn = sqlite3.connect(self.db_file)
             c = conn.cursor()
             
-            # Get current market cap from tokens table instead
+            # Get market cap data
             c.execute('''
-                SELECT current_market_cap, peak_market_cap
+                SELECT current_market_cap, peak_market_cap, created_at
                 FROM tokens 
                 WHERE address = ?
             ''', (token_address,))
             
             result = c.fetchone()
             if not result or not result[0]:
-                return 50.0  # Default score for new tokens
+                logging.info(f"No market cap data for token {token_address}")
+                return 30.0  # Lower score for new/unknown tokens
                 
             current_mcap = float(result[0])
             peak_mcap = float(result[1] or current_mcap)
+            created_at = int(result[2] or time.time())
             
-            # Score based on market cap and stability
+            # Base score from market cap size
             if current_mcap < 30000:
-                return 30.0
+                base_score = 30.0
             elif current_mcap < 100000:
-                return 50.0
+                base_score = 50.0
             elif current_mcap < 500000:
-                return 70.0
+                base_score = 70.0
             else:
-                # Add stability bonus if current is close to peak
-                base_score = 80.0
-                stability_ratio = current_mcap / peak_mcap
-                stability_bonus = stability_ratio * 20.0
-                return min(base_score + stability_bonus, 100.0)
-                
+                base_score = 85.0
+            
+            # Stability bonus (up to 10 points)
+            stability_ratio = current_mcap / peak_mcap
+            stability_bonus = stability_ratio * 10.0
+            
+            # Growth rate bonus (up to 5 points)
+            time_since_creation = max(1, (time.time() - created_at) / 3600)  # Hours
+            hourly_growth = (current_mcap - 30000) / time_since_creation
+            growth_bonus = min(hourly_growth / 1000, 5.0)  # Up to 5 points for growing $1000/hour
+            
+            final_score = min(base_score + stability_bonus + growth_bonus, 100)
+            logging.info(f"Market cap score: {final_score:.2f} (mcap=${current_mcap:,.2f}, stability={stability_ratio:.2f}, growth=${hourly_growth:,.2f}/h)")
+            return final_score
+            
         except Exception as e:
             logging.error(f"Error in market cap score calculation: {e}")
-            return 50.0  # Default score on error
+            return 30.0  # Conservative score on error
         finally:
             if 'conn' in locals():
                 conn.close()
