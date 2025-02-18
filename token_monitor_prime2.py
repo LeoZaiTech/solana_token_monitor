@@ -1146,7 +1146,7 @@ class TokenScorer:
             
             # Get market cap data
             c.execute('''
-                SELECT current_market_cap, peak_market_cap, created_at
+                SELECT current_market_cap, peak_market_cap
                 FROM tokens 
                 WHERE address = ?
             ''', (token_address,))
@@ -1158,8 +1158,6 @@ class TokenScorer:
                 
             current_mcap = float(result[0])
             peak_mcap = float(result[1] or current_mcap)
-            created_at = int(result[2] or time.time())
-            
             # Base score from market cap size
             if current_mcap < 30000:
                 base_score = 30.0
@@ -1174,12 +1172,7 @@ class TokenScorer:
             stability_ratio = current_mcap / peak_mcap
             stability_bonus = stability_ratio * 10.0
             
-            # Growth rate bonus (up to 5 points)
-            time_since_creation = max(1, (time.time() - created_at) / 3600)  # Hours
-            hourly_growth = (current_mcap - 30000) / time_since_creation
-            growth_bonus = min(hourly_growth / 1000, 5.0)  # Up to 5 points for growing $1000/hour
-            
-            final_score = min(base_score + stability_bonus + growth_bonus, 100)
+            final_score = min(base_score + stability_bonus, 100)
             logging.info(f"Market cap score: {final_score:.2f} (mcap=${current_mcap:,.2f}, stability={stability_ratio:.2f}, growth=${hourly_growth:,.2f}/h)")
             return final_score
             
